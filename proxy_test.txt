@@ -52,6 +52,11 @@ GIT_CURL_VERBOSE=1 git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=5 \
   ls-remote https://$USER:$PAT@github.com/fauserics/sas.git | head
 exit
 
+# dentro de un pod de prueba (curlbox)
+curl -sS -u "fauserics:$PAT" -H 'User-Agent: curl' \
+  https://api.github.com/repos/fauserics/sas/contents/ | head
+
+
 '
 
 
