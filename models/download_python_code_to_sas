@@ -1,37 +1,6 @@
-%let SRC=%sysfunc(pathname(work))/train.py;   /* origen en WORK */
-%let NAME=train.py;
-%let BASE=%sysfunc(getoption(servicesbaseurl));
-
-/* 1) Tu Home URI del Files Service */
-filename _r temp;
-proc http url="&BASE/files/users/@me/home"
-         method=GET out=_r oauth_bearer=sas_services;
+filename out "%sysfunc(pathname(work))/train.py";
+proc http
+  url="https://raw.githubusercontent.com/fauserics/sas/main/models/train.py"
+  method=GET out=out;
+  headers "User-Agent"="SAS";
 run;
-libname J json fileref=_r;
-%let HOMEURI=;
-data _null_; set J.alldata; if upcase(scalarkey)='URI' then call symputx('HOMEURI',value,'L'); run;
-libname J clear;
-
-/* 2) Preparo cabeceras en un archivo (HEADERIN=) */
-filename _hdr temp;
-data _null_; file _hdr lrecl=32767;
-  put 'Content-Type: application/octet-stream';
-  put "Content-Disposition: attachment; filename=&NAME";
-run;
-
-/* 3) POST del archivo */
-filename _up "&SRC";
-filename _o temp;
-proc http method=POST
-  url="&BASE/files/files?parentUri=&HOMEURI"
-  in=_up out=_o
-  headerin=_hdr
-  oauth_bearer=sas_services;
-run;
-
-%put STATUS=&SYS_PROCHTTP_STATUS_CODE &SYS_PROCHTTP_STATUS_PHRASE;  /* 201 Created esperado */
-
-/* (Opcional) Mostrar respuesta para ver ID/URI */
-libname U json fileref=_o;
-proc print data=U.alldata; run;
-libname U clear;
