@@ -8,4 +8,24 @@ kubectl exec -n <ns> -it sas-model-publish-6f8dbdd879-zthcq -- sh -lc '
   curl -s -o /dev/null -w "HTTP %{http_code}\n" \
     -u "$USER:$PAT" \
     "https://github.com/fauserics/sas.git/info/refs?service=git-upload-pack";
+
+
+kubectl run curlbox -n <tu-namespace> -it --rm --restart=Never \
+  --image=curlimages/curl -- sh
+
+# ¿Resuelve DNS?
+nslookup github.com || getent hosts github.com
+
+# ¿Responde el sitio?
+curl -I --connect-timeout 5 --max-time 10 https://github.com
+
+# ¿Abre el puerto 443?
+curl -sS --connect-timeout 5 --max-time 10 https://github.com > /dev/null && echo OK || echo FAIL
+
+# Prueba del endpoint que usa git (con auth básica)
+USER=fauserics
+PAT='tu_token_aqui'
+curl -sS -u "$USER:$PAT" --connect-timeout 5 --max-time 15 \
+  "https://github.com/fauserics/sas.git/info/refs?service=git-upload-pack" | head
+
 '
