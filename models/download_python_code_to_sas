@@ -1,0 +1,18 @@
+%let FILE=score.py;
+%let OUTDIR=%sysfunc(pathname(work));
+
+filename resp "&OUTDIR./resp.json";
+proc http
+  url="https://api.github.com/repos/&OWNER/&REPO/contents/&PATH/&FILE"
+  method="GET" out=resp;
+  headers "Authorization"="token &PAT" "User-Agent"="SAS";
+run;
+
+proc python; submit;
+import json, base64
+resp_path = r"&OUTDIR./resp.json"
+out_path  = r"&OUTDIR./&FILE"
+data = json.load(open(resp_path, "r", encoding="utf-8"))
+open(out_path, "wb").write(base64.b64decode(data["content"]))
+print("Saved:", out_path)
+endsubmit; quit;
