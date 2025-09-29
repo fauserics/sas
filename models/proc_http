@@ -20,3 +20,33 @@ libname R clear;
 filename out "&OUT";
 proc http url="&URL" method="GET" out=out;
 run;
+
+/*work to HOME*/
+/* Ajustá el nombre si tu archivo es otro */
+%let SRC=%sysfunc(pathname(work))/train.py;   /* archivo que ya tenés en WORK */
+%let NAME=train.py;
+
+/* Descubrir tu “Home” del Files Service */
+%let BASE=%sysfunc(getoption(servicesbaseurl));
+filename _r temp;
+proc http url="&BASE/files/users/@me/home"
+         method=GET out=_r oauth_bearer=sas_services;
+run;
+libname J json fileref=_r;
+%let HOMEURI=;
+data _null_;
+  set J.alldata;
+  if upcase(scalarkey)='URI' then call symputx('HOMEURI', value, 'L');
+run;
+libname J clear;
+
+/* Subir el archivo a Files (Home) */
+filename _up "&SRC";
+proc http method=POST
+  url="&BASE/files/files?parentUri=&HOMEURI"
+  in=_up out=_null_
+  oauth_bearer=sas_services
+  headers "Content-Type"="application/octet-stream"
+          "Content-Disposition"="attachment; filename=&NAME";
+run;
+
