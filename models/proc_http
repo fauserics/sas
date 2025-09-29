@@ -1,0 +1,15 @@
+%let OWNER=fauserics;
+%let REPO=sas;
+%let PATH=models/hmeq_auto/v1;
+%let PAT=ghp_xxx;  /* tu token */
+
+filename resp temp;
+proc http
+  url="https://api.github.com/repos/&OWNER/&REPO/contents/&PATH"
+  method="GET" out=resp;
+  headers "Authorization"="token &PAT" "User-Agent"="SAS";
+run;
+
+libname R JSON fileref=resp;
+proc print data=R.alldata(obs=20); run;  /* ves name, path, sha, etc. */
+libname R clear;
