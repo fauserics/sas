@@ -1,12 +1,13 @@
 proc python;
 submit;
-/* ==== Auto-ML binario desde CAS (Public.HMEQ) → artefactos para Streamlit ==== */
 import os, sys, json, joblib, warnings, traceback
 warnings.filterwarnings("ignore")
 print("Python:", sys.version)
 
 try:
-    import pandas as pd, numpy as np, swat
+    import pandas as pd
+    import numpy as np
+    import swat
     from sklearn.compose import ColumnTransformer
     from sklearn.impute import SimpleImputer
     from sklearn.pipeline import Pipeline
@@ -16,20 +17,20 @@ try:
     from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
     try:
         from sklearn.preprocessing import OneHotEncoder
-        OHE = OneHotEncoder(handle_unknown="ignore", sparse_output=False)  # sklearn >=1.2
+        OHE = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
     except TypeError:
         from sklearn.preprocessing import OneHotEncoder
-        OHE = OneHotEncoder(handle_unknown="ignore", sparse=False)         # sklearn <1.2
+        OHE = OneHotEncoder(handle_unknown="ignore", sparse=False)
 
-    # ---------------- Config ----------------
-    CAS_LIB      = os.getenv("CAS_LIB", "Public")
-    CAS_TABLE    = os.getenv("CAS_TABLE", "HMEQ")
-    TARGET       = os.getenv("TARGET", "BAD")   # positivo = 1
-    BEST_METRIC  = os.getenv("BEST_METRIC", "roc_auc")
-    TEST_SIZE    = float(os.getenv("TEST_SIZE", "0.3"))
+    # ----- Config -----
+    CAS_LIB = os.getenv("CAS_LIB", "Public")
+    CAS_TABLE = os.getenv("CAS_TABLE", "HMEQ")
+    TARGET = os.getenv("TARGET", "BAD")              # evento positivo = 1
+    BEST_METRIC = os.getenv("BEST_METRIC", "roc_auc")# roc_auc|pr_auc|f1
+    TEST_SIZE = float(os.getenv("TEST_SIZE", "0.3"))
     RANDOM_STATE = int(os.getenv("RANDOM_STATE", "42"))
 
-    # ---------------- Leer CAS ----------------
+    # ----- CAS -----
     def connect_cas():
         try:
             s = swat.CAS(); s.serverstatus(); return s
@@ -45,26 +46,34 @@ try:
     s = connect_cas()
     df = s.CASTable(CAS_TABLE, caslib=CAS_LIB).to_frame()
     if TARGET not in df.columns:
-        raise ValueError(f"No encuentro {TARGET} en {CAS_LIB}.{CAS_TABLE}")
+        raise ValueError(f"Target '{TARGET}' not found in {CAS_LIB}.{CAS_TABLE}")
     df[TARGET] = df[TARGET].astype(int)
 
-    X, y = df.drop(columns=[TARGET]), df[TARGET].values
+    X = df.drop(columns=[TARGET]); y = df[TARGET].values
     num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     cat_cols = [c for c in X.columns if c not in num_cols]
 
+    # ----- Prepro + candidatos -----
     numeric = Pipeline([("imputer", SimpleImputer(strategy="median"))])
-    categorical = Pipeline([("imputer", SimpleImputer(strategy="most_frequent")),
-                            ("onehot", OHE)]) if cat_cols else None
-    transformers = [("num", numeric, num_cols)] + ([("cat", categorical, cat_cols)] if cat_cols else [])
-    preprocess = ColumnTransformer(transformers)
+    if cat_cols:
+        categorical = Pipeline([
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("onehot", OHE)
+        ])
+        preprocess = ColumnTransformer([("num", numeric, num_cols),
+                                        ("cat", categorical, cat_cols)])
+    else:
+        preprocess = ColumnTransformer([("num", numeric, num_cols)])
 
     candidates = {
-        "logistic": LogisticRegression(max_iter=1000, solver="liblinear", class_weight="balanced", random_state=RANDOM_STATE),
-        "rf": RandomForestClassifier(n_estimators=300, n_jobs=-1, class_weight="balanced", random_state=RANDOM_STATE),
-        "gb": GradientBoostingClassifier(random_state=RANDOM_STATE),
+        "logistic": LogisticRegression(max_iter=1000, solver="liblinear",
+                                       class_weight="balanced", random_state=RANDOM_STATE),
+        "rf": RandomForestClassifier(n_estimators=300, n_jobs=-1,
+                                     class_weight="balanced", random_state=RANDOM_STATE),
+        "gb": GradientBoostingClassifier(random_state=RANDOM_STATE)
     }
 
-    # pesos por clase (para desbalance)
+    # ----- Split + pesos -----
     pos_w = (len(y)/(2.0*(y==1).sum())) if (y==1).sum()>0 else 1.0
     neg_w = (len(y)/(2.0*(y==0).sum())) if (y==0).sum()>0 else 1.0
     sw = np.where(y==1, pos_w, neg_w)
@@ -91,38 +100,40 @@ try:
         f1s = _np.where((prec+rec)>0, 2*prec*rec/(prec+rec), 0.0)
         idx = int(_np.nanargmax(f1s[:-1])) if len(f1s)>1 else 0
         best_thr = float(thr[idx]) if len(thr) else 0.5
-        from sklearn.metrics import f1_score
         f1 = f1_score(yte, (p1>=best_thr).astype(int), pos_label=1)
         return {"name":name,"roc_auc":float(roc),"pr_auc":float(prc),
-                "logloss":float(ll),"f1_at_best":float(f1),"best_threshold":best_thr,"pipeline":pipe}
+                "logloss":float(ll),"f1_at_best":float(f1),
+                "best_threshold":best_thr,"pipeline":pipe}
 
     results = [fit_eval(n,e) for n,e in candidates.items()]
     key = {"roc_auc":"roc_auc","pr_auc":"pr_auc","f1":"f1_at_best"}.get(BEST_METRIC,"roc_auc")
     best = max(results, key=lambda r: r[key])
 
-    # --------- Guardar artefactos ---------
+    # ----- Artefactos -----
     joblib.dump(best["pipeline"], "pipeline.pkl")
 
     def levels_for(col, max_levels=50):
-        import pandas as _pd
-        vals = _pd.Series(col).dropna().astype(str).unique().tolist()
+        vals = pd.Series(col).dropna().astype(str).unique().tolist()
         return vals[:max_levels] if len(vals)>max_levels else vals
 
     metadata = {
-      "model_name": f"hmeq_{best['name']}",
-      "version": "v1",
-      "target": TARGET,
-      "threshold": float(best["best_threshold"]),
-      "selection_metric": key,
-      "metrics_holdout": {k: best[k] for k in ["roc_auc","pr_auc","logloss","f1_at_best"]},
-      "inputs": [
-        {"name":c, "type":("number" if c in num_cols else "string"), "required":False,
-         **({"levels": levels_for(X[c])} if c in cat_cols else {})}
-        for c in X.columns
-      ],
-      "outputs": [{"name":"p_1","type":"number"},{"name":"label","type":"int"}]
+        "model_name": f"hmeq_{best['name']}",
+        "version": "v1",
+        "target": TARGET,
+        "threshold": float(best["best_threshold"]),
+        "selection_metric": key,
+        "metrics_holdout": {k: best[k] for k in ["roc_auc","pr_auc","logloss","f1_at_best"]},
+        "inputs": [
+            {"name": c,
+             "type": ("number" if c in num_cols else "string"),
+             "required": False,
+             **({"levels": levels_for(X[c])} if c in cat_cols else {})}
+            for c in X.columns
+        ],
+        "outputs": [{"name":"p_1","type":"number"},{"name":"label","type":"int"}]
     }
-    with open("metadata.json","w",encoding="utf-8") as f: json.dump(metadata,f,indent=2,ensure_ascii=False)
+    with open("metadata.json","w",encoding="utf-8") as f:
+        json.dump(metadata,f,indent=2,ensure_ascii=False)
 
     with open("models_trained.json","w",encoding="utf-8") as f:
         json.dump({"best_by": key, "models": [
@@ -130,42 +141,46 @@ try:
             for r in results
         ]}, f, indent=2)
 
-    score_py = """import os, threading, pandas as pd, joblib, json
-_LOCK=threading.Lock(); _MODEL=None; _THRESHOLD=None
-def _meta_thr():
-    here=os.path.dirname(__file__) if "__file__" in globals() else os.getcwd()
-    try:
-        with open(os.path.join(here,'metadata.json'),'r',encoding='utf-8') as f: return float(json.load(f).get('threshold',0.5))
-    except Exception: return 0.5
-def _ensure_pkl(p):
-    if os.path.exists(p): return
-    url=os.environ.get('PIPELINE_URL')
-    if url:
-        import requests; r=requests.get(url,timeout=20); r.raise_for_status()
-        open(p,'wb').write(r.content)
-def _load():
-    global _MODEL,_THRESHOLD
-    if _MODEL is None:
-        with _LOCK:
-            if _MODEL is None:
-                here=os.path.dirname(__file__) if "__file__" in globals() else os.getcwd()
-                pkl=os.path.join(here,'pipeline.pkl'); _ensure_pkl(pkl); _MODEL=joblib.load(pkl)
-                _THRESHOLD=float(os.environ.get('THRESHOLD','nan'))
-                if not (_THRESHOLD==_THRESHOLD): _THRESHOLD=_meta_thr()
-    return _MODEL,_THRESHOLD
-def _score_one(d):
-    m,t=_load(); X=pd.DataFrame([d]); p1=float(m.predict_proba(X)[0,1]); return {'p_1':p1,'label':int(p1>=t)}
-def score(record):
-    if isinstance(record,list): return [_score_one(r) for r in record]
-    return _score_one(record)
-"""
+    score_py = (
+        "import os, threading, pandas as pd, joblib, json\n"
+        "_LOCK=threading.Lock(); _MODEL=None; _THRESHOLD=None\n"
+        "def _meta_thr():\n"
+        "    here=os.path.dirname(__file__) if \"__file__\" in globals() else os.getcwd()\n"
+        "    try:\n"
+        "        with open(os.path.join(here,'metadata.json'),'r',encoding='utf-8') as f:\n"
+        "            return float(json.load(f).get('threshold',0.5))\n"
+        "    except Exception:\n"
+        "        return 0.5\n"
+        "def _ensure_pkl(p):\n"
+        "    if os.path.exists(p): return\n"
+        "    url=os.environ.get('PIPELINE_URL')\n"
+        "    if url:\n"
+        "        import requests; r=requests.get(url,timeout=20); r.raise_for_status(); open(p,'wb').write(r.content)\n"
+        "def _load():\n"
+        "    global _MODEL,_THRESHOLD\n"
+        "    if _MODEL is None:\n"
+        "        with _LOCK:\n"
+        "            if _MODEL is None:\n"
+        "                here=os.path.dirname(__file__) if \"__file__\" in globals() else os.getcwd()\n"
+        "                pkl=os.path.join(here,'pipeline.pkl'); _ensure_pkl(pkl); _MODEL=joblib.load(pkl)\n"
+        "                _THRESHOLD=float(os.environ.get('THRESHOLD','nan'))\n"
+        "                if not (_THRESHOLD==_THRESHOLD): _THRESHOLD=_meta_thr()\n"
+        "    return _MODEL,_THRESHOLD\n"
+        "def _score_one(d):\n"
+        "    m,t=_load(); X=pd.DataFrame([d]); p1=float(m.predict_proba(X)[0,1]); return {'p_1':p1,'label':int(p1>=t)}\n"
+        "def score(record):\n"
+        "    if isinstance(record,list): return [_score_one(r) for r in record]\n"
+        "    return _score_one(record)\n"
+    )
     with open("score.py","w",encoding="utf-8") as f: f.write(score_py)
     with open("requirements.txt","w") as f:
         f.write("pandas>=2.0\nnumpy>=1.24\nscikit-learn>=1.0\njoblib>=1.2\nrequests>=2.31\n")
 
-    print("Listo ✅ — Artefactos: pipeline.pkl, metadata.json, score.py, requirements.txt, models_trained.json")
+    print("OK — Artefactos: pipeline.pkl, metadata.json, score.py, requirements.txt, models_trained.json")
 
 except Exception:
-    print("❌ ERROR EN PYTHON"); traceback.print_exc(); raise
+    print("ERROR:")
+    traceback.print_exc()
+    raise
 endsubmit;
 quit;
