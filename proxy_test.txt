@@ -56,6 +56,18 @@ exit
 curl -sS -u "fauserics:$PAT" -H 'User-Agent: curl' \
   https://api.github.com/repos/fauserics/sas/contents/ | head
 
+/*prubea final*/
+# abre una shell en un pod de prueba con git
+kubectl run gitbox -n <tu-ns> --rm -it --restart=Never --image=alpine/git -- sh
+
+USER=fauserics
+PAT='PEGA_AQUI_TU_PAT'
+
+# Verboso + timeouts (para que no “cuelgue”)
+GIT_CURL_VERBOSE=1 git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=5 \
+  ls-remote https://$USER:$PAT@github.com/fauserics/sas.git | head
+exit
+
 
 '
 
