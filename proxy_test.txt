@@ -1,0 +1,11 @@
+# Reemplazá <ns> por tu namespace y <PAT> por el token (sin < >)
+kubectl exec -n <ns> -it sas-model-publish-6f8dbdd879-zthcq -- sh -lc '
+  echo "== Probar reachability ==";
+  curl -sI https://github.com | head -n 3 || true;
+
+  echo "== Probar Git endpoint con auth básica (debería dar 200) ==";
+  PAT="<PAT>"; USER="fauserics";
+  curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+    -u "$USER:$PAT" \
+    "https://github.com/fauserics/sas.git/info/refs?service=git-upload-pack";
+'
