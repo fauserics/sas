@@ -14,3 +14,32 @@ resp = json.load(open(r"&OUTDIR./resp.json","r",encoding="utf-8"))
 open(r"&OUTDIR./train.py","wb").write(base64.b64decode(resp["content"]))
 print("Saved:", os.path.join(r"&OUTDIR.","train.py"))
 endsubmit; quit;
+
+/* Sube WORK/train.py a Files (Home) para verlo en la UI */
+%let SRC=%sysfunc(pathname(work))/train.py;  /* origen en WORK */
+%let NAME=train.py;                           /* nombre visible en Home */
+%let BASE=%sysfunc(getoption(servicesbaseurl));
+
+/* Descubrir tu Home URI */
+filename _r temp;
+proc http url="&BASE/files/users/@me/home"
+         method=GET out=_r oauth_bearer=sas_services;
+run;
+libname J json fileref=_r;
+%let HOMEURI=;
+data _null_; set J.alldata; if upcase(scalarkey)='URI' then call symputx('HOMEURI',value,'L'); run;
+libname J clear;
+
+/* Subir el archivo */
+filename _up "&SRC";
+filename _o temp;
+proc http method=POST
+  url="&BASE/files/files?parentUri=&HOMEURI"
+  in=_up out=_o
+  oauth_bearer=sas_services
+  headers "Content-Type"="application/octet-stream"
+          "Content-Disposition"="attachment; filename=&NAME";
+run;
+
+%put STATUS=&SYS_PROCHTTP_STATUS_CODE &SYS_PROCHTTP_STATUS_PHRASE;  /* 201 Created esperado */
+
