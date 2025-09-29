@@ -1,4 +1,2 @@
-import os, pathlib
-print("hello from node")
-print("CWD:", os.getcwd())
-pathlib.Path("ms_test.txt").write_text("ok")
+%put WORK=%sysfunc(pathname(work));
+data _null_; file "%sysfunc(pathname(work))/stmp_test.txt"; put "ok"; run;
