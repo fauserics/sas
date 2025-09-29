@@ -1,26 +1,8 @@
-%let URL=https://api.github.com/repos/fauserics/sas/contents/models/train.py?ref=main;
-%let OUTDIR=%sysfunc(pathname(work));
-%let PAT=ghp_xxx; /* si es privado */
-
-filename resp "&OUTDIR./resp.json";
-proc http url="&URL" method="GET" out=resp;
-  headers "User-Agent"="SAS"
-          "Authorization"="token &PAT"; /* quitalo si es público */
-run;
-
-proc python; submit;
-import json, base64, os
-resp = json.load(open(r"&OUTDIR./resp.json","r",encoding="utf-8"))
-open(r"&OUTDIR./train.py","wb").write(base64.b64decode(resp["content"]))
-print("Saved:", os.path.join(r"&OUTDIR.","train.py"))
-endsubmit; quit;
-
-/* Sube WORK/train.py a Files (Home) para verlo en la UI */
-%let SRC=%sysfunc(pathname(work))/train.py;  /* origen en WORK */
-%let NAME=train.py;                           /* nombre visible en Home */
+%let SRC=%sysfunc(pathname(work))/train.py;   /* origen en WORK */
+%let NAME=train.py;
 %let BASE=%sysfunc(getoption(servicesbaseurl));
 
-/* Descubrir tu Home URI */
+/* 1) Tu Home URI del Files Service */
 filename _r temp;
 proc http url="&BASE/files/users/@me/home"
          method=GET out=_r oauth_bearer=sas_services;
@@ -30,16 +12,26 @@ libname J json fileref=_r;
 data _null_; set J.alldata; if upcase(scalarkey)='URI' then call symputx('HOMEURI',value,'L'); run;
 libname J clear;
 
-/* Subir el archivo */
+/* 2) Preparo cabeceras en un archivo (HEADERIN=) */
+filename _hdr temp;
+data _null_; file _hdr lrecl=32767;
+  put 'Content-Type: application/octet-stream';
+  put "Content-Disposition: attachment; filename=&NAME";
+run;
+
+/* 3) POST del archivo */
 filename _up "&SRC";
 filename _o temp;
 proc http method=POST
   url="&BASE/files/files?parentUri=&HOMEURI"
   in=_up out=_o
-  oauth_bearer=sas_services
-  headers "Content-Type"="application/octet-stream"
-          "Content-Disposition"="attachment; filename=&NAME";
+  headerin=_hdr
+  oauth_bearer=sas_services;
 run;
 
 %put STATUS=&SYS_PROCHTTP_STATUS_CODE &SYS_PROCHTTP_STATUS_PHRASE;  /* 201 Created esperado */
 
+/* (Opcional) Mostrar respuesta para ver ID/URI */
+libname U json fileref=_o;
+proc print data=U.alldata; run;
+libname U clear;
