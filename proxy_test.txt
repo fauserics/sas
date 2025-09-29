@@ -28,4 +28,16 @@ PAT='tu_token_aqui'
 curl -sS -u "$USER:$PAT" --connect-timeout 5 --max-time 15 \
   "https://github.com/fauserics/sas.git/info/refs?service=git-upload-pack" | head
 
+
+
+kubectl run curlbox -n <TU_NS> -it --rm --restart=Never --image=curlimages/curl -- sh -lc '
+  USER=fauserics; PAT="TU_PAT_AQUI";
+  curl -s -u "$USER:$PAT" https://api.github.com/user | sed -n "1,30p"
+'
+kubectl run gitbox -n <TU_NS> -it --rm --restart=Never --image=alpine/git -- sh -lc '
+  USER=fauserics; PAT="TU_PAT_AQUI";
+  git ls-remote https://$USER:$PAT@github.com/fauserics/sas.git | head
+'
+
+
 '
