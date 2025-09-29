@@ -41,12 +41,16 @@ run;
 libname J clear;
 
 /* Subir el archivo a Files (Home) */
-filename _up "&SRC";
-proc http method=POST
-  url="&BASE/files/files?parentUri=&HOMEURI"
-  in=_up out=_null_
-  oauth_bearer=sas_services
-  headers "Content-Type"="application/octet-stream"
-          "Content-Disposition"="attachment; filename=&NAME";
+filename resp temp;
+proc http
+  method="GET"
+  url="https://api.github.com/repos/fauserics/sas/contents/models/train.py?ref=main"
+  out=resp;
+  headers
+    "User-Agent"   = "SAS"
+    "Authorization"= "token &PAT"
+    "Accept"       = "application/vnd.github+json"
+  ;
 run;
+
 
