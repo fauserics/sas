@@ -1,18 +1,16 @@
-%let FILE=score.py;
+%let URL=https://api.github.com/repos/fauserics/sas/contents/models/train.py?ref=main;
 %let OUTDIR=%sysfunc(pathname(work));
+%let PAT=ghp_xxx; /* si es privado */
 
 filename resp "&OUTDIR./resp.json";
-proc http
-  url="https://api.github.com/repos/&OWNER/&REPO/contents/&PATH/&FILE"
-  method="GET" out=resp;
-  headers "Authorization"="token &PAT" "User-Agent"="SAS";
+proc http url="&URL" method="GET" out=resp;
+  headers "User-Agent"="SAS"
+          "Authorization"="token &PAT"; /* quitalo si es público */
 run;
 
 proc python; submit;
-import json, base64
-resp_path = r"&OUTDIR./resp.json"
-out_path  = r"&OUTDIR./&FILE"
-data = json.load(open(resp_path, "r", encoding="utf-8"))
-open(out_path, "wb").write(base64.b64decode(data["content"]))
-print("Saved:", out_path)
+import json, base64, os
+resp = json.load(open(r"&OUTDIR./resp.json","r",encoding="utf-8"))
+open(r"&OUTDIR./train.py","wb").write(base64.b64decode(resp["content"]))
+print("Saved:", os.path.join(r"&OUTDIR.","train.py"))
 endsubmit; quit;
