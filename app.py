@@ -21,7 +21,7 @@ import streamlit as st
 from sas_code_translator import compile_sas_score, score_dataframe as score_df_local
 from viya_mas_client import score_row_via_rest  # requires env: VIYA_URL, MAS_MODULE_ID, token/creds
 
-APP_TITLE = "Real Time Scoring App (porwered by SAS)"
+APP_TITLE = "Real Time Scoring App (powered by SAS)"
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 
