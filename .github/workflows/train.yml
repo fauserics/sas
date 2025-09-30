@@ -1,0 +1,84 @@
+name: Train Model (models/train.py)
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ main ]
+    paths:
+      - "models/**"
+  schedule:
+    - cron: "0 3 * * *"  # daily at 03:00 UTC
+
+permissions:
+  contents: write   # needed to push artifacts back to repo
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('models/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          if [ -f models/requirements.txt ]; then
+            pip install -r models/requirements.txt
+          else
+            # fallback (keep in sync with your trainer)
+            pip install pandas numpy scikit-learn joblib
+          fi
+
+      - name: Run training
+        env:
+          DATA_MODE: csv
+          CSV_PATH: models/hmeq.csv
+          TARGET: BAD
+          OUT_DIR: models
+        run: |
+          python models/train.py
+          ls -lh models
+
+      - name: Upload run artifacts (for inspection)
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-artifacts
+          path: |
+            models/pipeline.pkl
+            models/metadata.json
+            models/score.py
+            models/metrics_all.csv
+            models/metrics_best.json
+            models/confusion_matrix_best.csv
+            models/roc_curve_best.csv
+            models/pr_curve_best.csv
+
+      - name: Commit & push updated artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add models/pipeline.pkl models/metadata.json models/score.py \
+                  models/metrics_all.csv models/metrics_best.json \
+                  models/confusion_matrix_best.csv models/roc_curve_best.csv models/pr_curve_best.csv
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(models): update trained artifacts [skip ci]"
+            git push
+          fi
