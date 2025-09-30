@@ -1,5 +1,5 @@
 # app.py
-# Real Time Scoring App (porwered by SAS)
+# Real Time Scoring App (powered by SAS)
 # Engines:
 #  1) GitHub (Python): translate SAS DATA step score code -> Python and run locally
 #  2) Viya REST: call MAS scoring endpoint
@@ -12,7 +12,7 @@ import streamlit as st
 from sas_code_translator import compile_sas_score, score_dataframe as score_df_local
 from viya_mas_client import score_row_via_rest  # needs VIYA_URL, MAS_MODULE_ID, token/creds
 
-APP_TITLE = "Real Time Scoring App (porwered by SAS)"
+APP_TITLE = "Real Time Scoring App (powered by SAS)"
 ENGINE_LABEL = "GitHub (Python)"
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -91,7 +91,8 @@ def parse_mas_outputs(resp_json: dict, threshold: float = 0.5) -> tuple[float, i
         label = 1 if float(prob) >= threshold else 0
     return float(prob), int(label)
 
-def build_single_record_form(fields: list[str], sample: pd.DataFrame) -> dict:
+def build_single_record_form(fields: list[str], sample: pd.DataFrame, key_prefix: str) -> dict:
+    """Render two-column form with UNIQUE widget keys (prefix)."""
     defaults = {}
     if not sample.empty:
         for c in fields:
@@ -111,16 +112,19 @@ def build_single_record_form(fields: list[str], sample: pd.DataFrame) -> dict:
     row = {}
     for i, c in enumerate(fields):
         tgt = left if i % 2 == 0 else right
+        key = f"{key_prefix}__{c}"
         if c in sample.columns and pd.api.types.is_numeric_dtype(sample[c]):
-            row[c] = tgt.number_input(c, value=float(defaults.get(c, 0.0)))
+            row[c] = tgt.number_input(c, value=float(defaults.get(c, 0.0)), key=key)
         else:
             opts = []
             if c in sample.columns and not sample.empty:
                 vals = sample[c].dropna().astype(str).unique().tolist()
                 if 1 <= len(vals) <= 50:
                     opts = sorted(vals)
-            row[c] = (tgt.selectbox(c, opts, index=0) if opts
-                      else tgt.text_input(c, value=str(defaults.get(c, ""))))
+            if opts:
+                row[c] = tgt.selectbox(c, opts, index=0, key=key)
+            else:
+                row[c] = tgt.text_input(c, value=str(defaults.get(c, "")), key=key)
     return row
 
 def is_ds2_astore(code: str) -> bool:
@@ -185,7 +189,7 @@ if can_translate and sas_path:
 with st.expander("Show generated Python score code", expanded=False):
     if st.session_state.score_py:
         st.code(st.session_state.score_py, language="python")
-        save_py = st.toggle("Save generated Python to file (score/translated_score.py)", value=False)
+        save_py = st.toggle("Save generated Python to file (score/translated_score.py)", value=False, key="save_py_toggle")
         if save_py:
             os.makedirs("score", exist_ok=True)
             outp = os.path.join("score", "translated_score.py")
@@ -204,10 +208,10 @@ with tabs[0]:
     fields = st.session_state.expected_cols or list(sample_df.columns)
     if not fields:
         st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
-    row = build_single_record_form(fields, sample_df)
+    row = build_single_record_form(fields, sample_df, key_prefix="gh_single")
 
     st.markdown(f"## 3) Score in {ENGINE_LABEL}")
-    do_local = st.button(f"Score in {ENGINE_LABEL}", type="primary", use_container_width=True,
+    do_local = st.button(f"Score in {ENGINE_LABEL}", type="primary", use_container_width=True, key="btn_gh_single",
                          disabled=(st.session_state.score_fn is None))
 
     if do_local:
@@ -229,10 +233,10 @@ with tabs[1]:
     fields = st.session_state.expected_cols or list(sample_df.columns)
     if not fields:
         st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
-    row_rest = build_single_record_form(fields, sample_df)
+    row_rest = build_single_record_form(fields, sample_df, key_prefix="viya_single")
 
     st.markdown("## 3) Score on Viya (REST)")
-    do_rest  = st.button("Score on Viya (REST)", use_container_width=True)
+    do_rest  = st.button("Score on Viya (REST)", use_container_width=True, key="btn_viya_single")
 
     if do_rest:
         try:
@@ -250,7 +254,7 @@ with tabs[1]:
 # ---- CSV batch ----
 with tabs[2]:
     st.markdown("## Batch scoring")
-    up = st.file_uploader("Upload a CSV with the input schema", type=["csv"])
+    up = st.file_uploader("Upload a CSV with the input schema", type=["csv"], key="uploader_csv")
     if up is not None:
         try:
             df = pd.read_csv(up)
@@ -262,8 +266,8 @@ with tabs[2]:
 
             c1, c2 = st.columns(2)
             do_local_csv = c1.button(f"Score CSV in {ENGINE_LABEL}",
-                                     use_container_width=True, disabled=(st.session_state.score_fn is None))
-            do_rest_csv  = c2.button("Score CSV on Viya (REST)", use_container_width=True)
+                                     use_container_width=True, disabled=(st.session_state.score_fn is None), key="btn_gh_csv")
+            do_rest_csv  = c2.button("Score CSV on Viya (REST)", use_container_width=True, key="btn_viya_csv")
 
             if do_local_csv:
                 try:
@@ -275,7 +279,8 @@ with tabs[2]:
                         data=scored.to_csv(index=False).encode("utf-8"),
                         file_name="scored_github_python.csv",
                         mime="text/csv",
-                        use_container_width=True
+                        use_container_width=True,
+                        key="download_gh_csv"
                     )
                 except Exception as e:
                     st.error(f"{ENGINE_LABEL} batch failed: {e}")
@@ -304,7 +309,8 @@ with tabs[2]:
                     data=scored_rest.to_csv(index=False).encode("utf-8"),
                     file_name="scored_viya.csv",
                     mime="text/csv",
-                    use_container_width=True
+                    use_container_width=True,
+                    key="download_viya_csv"
                 )
         except Exception as e:
             st.error(f"CSV error: {e}")
@@ -312,6 +318,7 @@ with tabs[2]:
 # ---- Info ----
 with tabs[3]:
     st.markdown("## Info")
+    sas_path = find_sas_score_file()
     st.write("- SAS score file:", f"`{sas_path}`" if sas_path else "_not found_")
     st.write("- Inputs from inputVar.json:", len(expected_from_json))
     st.write("- Current expected inputs:", len(st.session_state.expected_cols))
