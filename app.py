@@ -1,7 +1,7 @@
 # app.py
-# Real Time Scoring App (powered by SAS)
+# Real Time Scoring App (porwered by SAS)
 # Engines:
-#  1) Local: translate SAS DATA step score code -> Python and run
+#  1) GitHub (Python): translate SAS DATA step score code -> Python and run locally
 #  2) Viya REST: call MAS scoring endpoint
 
 import os
@@ -12,7 +12,9 @@ import streamlit as st
 from sas_code_translator import compile_sas_score, score_dataframe as score_df_local
 from viya_mas_client import score_row_via_rest  # needs VIYA_URL, MAS_MODULE_ID, token/creds
 
-APP_TITLE = "Real Time Scoring App (powered by SAS)"
+APP_TITLE = "Real Time Scoring App (porwered by SAS)"
+ENGINE_LABEL = "GitHub (Python)"
+
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 
@@ -123,8 +125,7 @@ def build_single_record_form(fields: list[str], sample: pd.DataFrame) -> dict:
 
 def is_ds2_astore(code: str) -> bool:
     sigs = ("package score", "dcl package score", "scoreRecord()", "method run()", "enddata;")
-    up = code
-    return any(s in up for s in sigs)
+    return any(s in code for s in sigs)
 
 # ---------- sidebar ----------
 with st.sidebar:
@@ -161,14 +162,14 @@ col_t1, col_t2 = st.columns([1, 3])
 with col_t1:
     can_translate = st.button("Translate SAS → Python", type="primary", use_container_width=True, disabled=not bool(sas_path))
 with col_t2:
-    st.caption("Translates your SAS DATA step score code into a Python function (no training required).")
+    st.caption(f"Translates your SAS DATA step score code into a Python function (runs in {ENGINE_LABEL}).")
 
 sas_is_ds2 = False
 if can_translate and sas_path:
     code = load_file_text(sas_path)
     sas_is_ds2 = is_ds2_astore(code)
     if sas_is_ds2:
-        st.warning("This SAS file looks like DS2/ASTORE (e.g., scoreRecord). Local translation is not supported. Use 'Score on Viya (REST)'.")
+        st.warning("This SAS file looks like DS2/ASTORE (e.g., scoreRecord). Translation is not supported. Use 'Score on Viya (REST)'.")
     else:
         try:
             score_fn, py_code, expected = compile_sas_score(
@@ -195,43 +196,49 @@ with st.expander("Show generated Python score code", expanded=False):
         st.info("Translate first to view the generated code.")
 
 # ---------- tabs ----------
-tabs = st.tabs(["Single case", "CSV batch", "Info"])
+tabs = st.tabs([f"Single case — {ENGINE_LABEL}", "Single case — Viya (REST)", "CSV batch", "Info"])
 
-# ---- Single case ----
+# ---- Single case — GitHub (Python) ----
 with tabs[0]:
-    st.markdown("## 2) Provide inputs")
+    st.markdown(f"## 2) Provide inputs for {ENGINE_LABEL}")
     fields = st.session_state.expected_cols or list(sample_df.columns)
     if not fields:
         st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
     row = build_single_record_form(fields, sample_df)
 
-    st.markdown("## 3) Score")
-    cA, cB = st.columns(2)
-    do_local = cA.button("Score locally (Python)", type="primary", use_container_width=True,
+    st.markdown(f"## 3) Score in {ENGINE_LABEL}")
+    do_local = st.button(f"Score in {ENGINE_LABEL}", type="primary", use_container_width=True,
                          disabled=(st.session_state.score_fn is None))
-    do_rest  = cB.button("Score on Viya (REST)", use_container_width=True)
 
-    results = {}
     if do_local:
         try:
             df_in = pd.DataFrame([row]).reindex(columns=fields, fill_value=None)
             scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
             p = float(scored["prob_BAD"].iloc[0]); lbl = int(scored["label_BAD"].iloc[0])
-            results["Local (Python)"] = (p, lbl)
-            st.success("Local scoring done.")
+            st.success(f"Scored in {ENGINE_LABEL}.")
             c1, c2 = st.columns(2)
-            c1.metric("Probability of BAD (local)", f"{p:0.4f}")
-            c2.metric("Predicted label (local)", "1" if lbl == 1 else "0")
+            c1.metric(f"Probability of BAD ({ENGINE_LABEL})", f"{p:0.4f}")
+            c2.metric(f"Predicted label ({ENGINE_LABEL})", "1" if lbl == 1 else "0")
             st.dataframe(scored)
         except Exception as e:
-            st.error(f"Local scoring failed: {e}")
+            st.error(f"{ENGINE_LABEL} scoring failed: {e}")
+
+# ---- Single case — Viya (REST) ----
+with tabs[1]:
+    st.markdown("## 2) Provide inputs for Viya (REST)")
+    fields = st.session_state.expected_cols or list(sample_df.columns)
+    if not fields:
+        st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
+    row_rest = build_single_record_form(fields, sample_df)
+
+    st.markdown("## 3) Score on Viya (REST)")
+    do_rest  = st.button("Score on Viya (REST)", use_container_width=True)
 
     if do_rest:
         try:
             with st.spinner("Calling Viya..."):
-                resp = score_row_via_rest(row)
+                resp = score_row_via_rest(row_rest)
             p, lbl = parse_mas_outputs(resp, threshold=thr)
-            results["Viya (REST)"] = (p, lbl)
             st.success("Viya scoring done.")
             c1, c2 = st.columns(2)
             c1.metric("Probability of BAD (Viya)", f"{p:0.4f}")
@@ -240,17 +247,8 @@ with tabs[0]:
         except Exception as e:
             st.error(f"Viya REST error: {e}")
 
-    if len(results) == 2:
-        (pl, ll) = results["Local (Python)"]
-        (pr, lr) = results["Viya (REST)"]
-        diff = abs(pl - pr); mismatch = int(ll != lr)
-        st.markdown("### Comparison")
-        d1, d2 = st.columns(2)
-        d1.metric("Δ Probability |local - viya|", f"{diff:0.6f}")
-        d2.metric("Label mismatch (0/1)", f"{mismatch}")
-
 # ---- CSV batch ----
-with tabs[1]:
+with tabs[2]:
     st.markdown("## Batch scoring")
     up = st.file_uploader("Upload a CSV with the input schema", type=["csv"])
     if up is not None:
@@ -263,24 +261,24 @@ with tabs[1]:
             df = df[fields]
 
             c1, c2 = st.columns(2)
-            do_local_csv = c1.button("Score CSV locally (Python)",
+            do_local_csv = c1.button(f"Score CSV in {ENGINE_LABEL}",
                                      use_container_width=True, disabled=(st.session_state.score_fn is None))
             do_rest_csv  = c2.button("Score CSV on Viya (REST)", use_container_width=True)
 
             if do_local_csv:
                 try:
                     scored = score_df_local(st.session_state.score_fn, df, threshold=thr)
-                    st.success(f"Scored locally: {len(scored)} rows.")
+                    st.success(f"Scored in {ENGINE_LABEL}: {len(scored)} rows.")
                     st.dataframe(scored.head(50))
                     st.download_button(
-                        "Download local-scored CSV",
+                        f"Download {ENGINE_LABEL} CSV",
                         data=scored.to_csv(index=False).encode("utf-8"),
-                        file_name="scored_local.csv",
+                        file_name="scored_github_python.csv",
                         mime="text/csv",
                         use_container_width=True
                     )
                 except Exception as e:
-                    st.error(f"Local batch failed: {e}")
+                    st.error(f"{ENGINE_LABEL} batch failed: {e}")
 
             if do_rest_csv:
                 rows = []
@@ -312,7 +310,7 @@ with tabs[1]:
             st.error(f"CSV error: {e}")
 
 # ---- Info ----
-with tabs[2]:
+with tabs[3]:
     st.markdown("## Info")
     st.write("- SAS score file:", f"`{sas_path}`" if sas_path else "_not found_")
     st.write("- Inputs from inputVar.json:", len(expected_from_json))
@@ -324,4 +322,4 @@ with tabs[2]:
     if not sample_df.empty:
         with st.expander("Preview sample data"):
             st.dataframe(sample_df.head(20))
-    st.caption("Tip: for DS2/ASTORE (.sas with package/scoreRecord), use Viya REST mode.")
+    st.caption(f"Tip: if the SAS file is DS2/ASTORE (contains scoreRecord/package), use the Viya REST tab. Otherwise, translate and score in {ENGINE_LABEL}.")
