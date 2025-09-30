@@ -39,6 +39,7 @@ def find_csv_path():
       2) env HMEQ_CSV (archivo o URL http/https)
       3) ./hmeq.csv
       4) ./data/hmeq.csv
+      5) <SAS WORK>/hmeq.csv  (si está en variables de entorno)
     """
     cands = []
     if len(sys.argv) > 1:
@@ -47,6 +48,12 @@ def find_csv_path():
         cands.append(os.getenv("HMEQ_CSV"))
     cands += ["hmeq.csv", os.path.join("data", "hmeq.csv")]
 
+    # Detectar carpeta WORK de SAS si fue pasada a Python
+    for key in ("SAS_WORK", "SAS_WORK_PATH", "WORK", "TMPDIR"):
+        wk = os.getenv(key)
+        if wk:
+            cands.append(os.path.join(wk, "hmeq.csv"))
+
     for p in cands:
         if not p:
             continue
@@ -54,9 +61,10 @@ def find_csv_path():
             return p
         if os.path.isfile(p):
             return p
+
     raise FileNotFoundError(
         "No se encontró el CSV. Pasá path/URL como arg, seteá HMEQ_CSV, "
-        "o ubicá hmeq.csv en el cwd o en ./data/hmeq.csv"
+        "o dejá hmeq.csv en el cwd, ./data o en &WORK."
     )
 
 
