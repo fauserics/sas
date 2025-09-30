@@ -2,76 +2,10 @@
   "creationTimeStamp": "0001-01-01T00:00:00Z",
   "modifiedTimeStamp": "0001-01-01T00:00:00Z",
   "revision": 0,
-  "name": "dmcas_scoreoutputs",
+  "name": "dmcas_scoreinputs",
   "version": 0,
   "order": 0,
   "parameterMap": {
-    "CREATOR": {
-      "label": "Creator",
-      "length": 255,
-      "order": 8,
-      "parameter": "CREATOR",
-      "preformatted": false,
-      "type": "char",
-      "values": [
-        "CREATOR"
-      ]
-    },
-    "CREATORGUID": {
-      "label": "Creator GUID",
-      "length": 36,
-      "order": 10,
-      "parameter": "CREATORGUID",
-      "preformatted": false,
-      "type": "char",
-      "values": [
-        "CREATORGUID"
-      ]
-    },
-    "FORMAT": {
-      "label": "Variable Format",
-      "length": 36,
-      "order": 6,
-      "parameter": "FORMAT",
-      "preformatted": false,
-      "type": "char",
-      "values": [
-        "FORMAT"
-      ]
-    },
-    "FUNCTION": {
-      "label": "Function",
-      "length": 32,
-      "order": 9,
-      "parameter": "FUNCTION",
-      "preformatted": false,
-      "type": "char",
-      "values": [
-        "FUNCTION"
-      ]
-    },
-    "LABEL": {
-      "label": "Variable Label",
-      "length": 256,
-      "order": 5,
-      "parameter": "LABEL",
-      "preformatted": false,
-      "type": "char",
-      "values": [
-        "LABEL"
-      ]
-    },
-    "LENGTH": {
-      "label": "Variable Length",
-      "length": 8,
-      "order": 7,
-      "parameter": "LENGTH",
-      "preformatted": false,
-      "type": "num",
-      "values": [
-        "LENGTH"
-      ]
-    },
     "NAME": {
       "label": "Name",
       "length": 255,
@@ -83,85 +17,240 @@
         "NAME"
       ]
     },
-    "ROLE": {
-      "label": "Role",
-      "length": 32,
-      "order": 2,
-      "parameter": "ROLE",
+    "format": {
+      "label": "Variable Format",
+      "length": 100,
+      "order": 7,
+      "parameter": "format",
       "preformatted": false,
       "type": "char",
       "values": [
-        "ROLE"
+        "format"
       ]
     },
-    "TYPE": {
-      "label": "Type",
-      "length": 1,
+    "label": {
+      "label": "Variable Label",
+      "length": 1000,
+      "order": 6,
+      "parameter": "label",
+      "preformatted": false,
+      "type": "char",
+      "values": [
+        "label"
+      ]
+    },
+    "length": {
+      "label": "Variable Length",
+      "length": 8,
+      "order": 8,
+      "parameter": "length",
+      "preformatted": false,
+      "type": "num",
+      "values": [
+        "length"
+      ]
+    },
+    "level": {
+      "label": "Variable Level",
+      "length": 256,
       "order": 3,
-      "parameter": "TYPE",
+      "parameter": "level",
       "preformatted": false,
       "type": "char",
       "values": [
-        "TYPE"
+        "level"
       ]
     },
-    "VARTYPE": {
-      "label": "Variable Type",
-      "length": 32,
-      "order": 4,
-      "parameter": "VARTYPE",
+    "role": {
+      "label": "Role",
+      "length": 256,
+      "order": 2,
+      "parameter": "role",
       "preformatted": false,
       "type": "char",
       "values": [
-        "VARTYPE"
+        "role"
+      ]
+    },
+    "type": {
+      "label": "Type",
+      "length": 20,
+      "order": 4,
+      "parameter": "type",
+      "preformatted": false,
+      "type": "char",
+      "values": [
+        "type"
+      ]
+    },
+    "vartype": {
+      "label": "Variable Type",
+      "length": 256,
+      "order": 5,
+      "parameter": "vartype",
+      "preformatted": false,
+      "type": "char",
+      "values": [
+        "vartype"
       ]
     }
   },
   "data": [
     {
       "dataMap": {
-        "CREATOR": "gradboost",
-        "CREATORGUID": "9e20a049-09f1-4db1-a603-9d780a5c809a",
-        "FORMAT": "",
-        "FUNCTION": "PREDICT",
-        "LABEL": "Predicted: BAD",
-        "LENGTH": "8",
-        "NAME": "EM_PREDICTION",
-        "ROLE": "PREDICT",
-        "TYPE": "N",
-        "VARTYPE": "double"
+        "NAME": "CLAGE",
+        "format": "",
+        "label": "",
+        "length": "8",
+        "level": "INTERVAL",
+        "role": "INPUT",
+        "type": "N",
+        "vartype": "double"
       },
       "rowNumber": 1
     },
     {
       "dataMap": {
-        "CREATOR": "gradboost",
-        "CREATORGUID": "9e20a049-09f1-4db1-a603-9d780a5c809a",
-        "FORMAT": "",
-        "FUNCTION": "PREDICT",
-        "LABEL": "Predicted: BAD",
-        "LENGTH": "8",
-        "NAME": "P_BAD",
-        "ROLE": "PREDICT",
-        "TYPE": "N",
-        "VARTYPE": "double"
+        "NAME": "CLNO",
+        "format": "",
+        "label": "",
+        "length": "8",
+        "level": "INTERVAL",
+        "role": "INPUT",
+        "type": "N",
+        "vartype": "double"
       },
       "rowNumber": 2
     },
     {
       "dataMap": {
-        "CREATOR": "gradboost",
-        "CREATORGUID": "9e20a049-09f1-4db1-a603-9d780a5c809a",
-        "FORMAT": "",
-        "FUNCTION": "ASSESS",
-        "LABEL": "Warnings",
-        "LENGTH": "4",
-        "NAME": "_WARN_",
-        "ROLE": "ASSESS",
-        "TYPE": "C",
-        "VARTYPE": "char"
+        "NAME": "DEBTINC",
+        "format": "",
+        "label": "",
+        "length": "8",
+        "level": "INTERVAL",
+        "role": "INPUT",
+        "type": "N",
+        "vartype": "double"
       },
       "rowNumber": 3
+    },
+    {
+      "dataMap": {
+        "NAME": "DELINQ",
+        "format": "",
+        "label": "",
+        "length": "8",
+        "level": "NOMINAL",
+        "role": "INPUT",
+        "type": "N",
+        "vartype": "double"
+      },
+      "rowNumber": 4
+    },
+    {
+      "dataMap": {
+        "NAME": "DEROG",
+        "format": "",
+        "label": "",
+        "length": "8",
+        "level": "NOMINAL",
+        "role": "INPUT",
+        "type": "N",
+        "vartype": "double"
+      },
+      "rowNumber": 5
+    },
+    {
+      "dataMap": {
+        "NAME": "JOB",
+        "format": "",
+        "label": "",
+        "length": "7",
+        "level": "NOMINAL",
+        "role": "INPUT",
+        "type": "C",
+        "vartype": "varchar"
+      },
+      "rowNumber": 6
+    },
+    {
+      "dataMap": {
+        "NAME": "LOAN",
+        "format": "",
+        "label": "",
+        "length": "8",
+        "level": "INTERVAL",
+        "role": "INPUT",
+        "type": "N",
+        "vartype": "double"
+      },
+      "rowNumber": 7
+    },
+    {
+      "dataMap": {
+        "NAME": "MORTDUE",
+        "format": "",
+        "label": "",
+        "length": "8",
+        "level": "INTERVAL",
+        "role": "INPUT",
+        "type": "N",
+        "vartype": "double"
+      },
+      "rowNumber": 8
+    },
+    {
+      "dataMap": {
+        "NAME": "NINQ",
+        "format": "",
+        "label": "",
+        "length": "8",
+        "level": "NOMINAL",
+        "role": "INPUT",
+        "type": "N",
+        "vartype": "double"
+      },
+      "rowNumber": 9
+    },
+    {
+      "dataMap": {
+        "NAME": "REASON",
+        "format": "",
+        "label": "",
+        "length": "7",
+        "level": "BINARY",
+        "role": "INPUT",
+        "type": "C",
+        "vartype": "varchar"
+      },
+      "rowNumber": 10
+    },
+    {
+      "dataMap": {
+        "NAME": "VALUE",
+        "format": "",
+        "label": "",
+        "length": "8",
+        "level": "INTERVAL",
+        "role": "INPUT",
+        "type": "N",
+        "vartype": "double"
+      },
+      "rowNumber": 11
+    },
+    {
+      "dataMap": {
+        "NAME": "YOJ",
+        "format": "",
+        "label": "",
+        "length": "8",
+        "level": "INTERVAL",
+        "role": "INPUT",
+        "type": "N",
+        "vartype": "double"
+      },
+      "rowNumber": 12
     }
   ],
   "xInteger": false,
