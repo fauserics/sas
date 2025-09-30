@@ -6,6 +6,7 @@ import sys
 import json
 import pandas as pd
 import joblib
+import tempfile
 
 # SWAT opcional para CAS
 try:
@@ -19,17 +20,66 @@ except ImportError:
 # Utils
 # --------------------------
 def _onehot_dense_kwargs():
-    """
-    Forzar salida densa en OneHotEncoder según versión scikit-learn:
-    - >=1.2:  sparse_output=False
-    - <=1.1:  sparse=False
-    """
+    """Forzar salida densa en OneHotEncoder según versión de scikit-learn."""
     try:
         from sklearn.preprocessing import OneHotEncoder
         _ = OneHotEncoder(sparse_output=False, handle_unknown="ignore")
         return {"sparse_output": False, "handle_unknown": "ignore"}
     except TypeError:
         return {"sparse": False, "handle_unknown": "ignore"}
+
+
+def _probe_work_paths():
+    """
+    Genera candidatos basados en WORK/TMP y un escaneo superficial (1–2 niveles).
+    Útil cuando el CSV está en &WORK/hmeq.csv y PROC PYTHON tiene cwd distinto.
+    """
+    cands = []
+
+    # 1) Env vars que podemos setear desde SAS
+    for key in ("SAS_WORK", "SAS_WORK_PATH", "WORK", "TMPDIR"):
+        wk = os.getenv(key)
+        if wk and os.path.isdir(wk):
+            cands.append(os.path.join(wk, "hmeq.csv"))
+            # un nivel dentro
+            try:
+                for d in os.listdir(wk):
+                    dp = os.path.join(wk, d)
+                    if os.path.isdir(dp):
+                        cands.append(os.path.join(dp, "hmeq.csv"))
+            except Exception:
+                pass
+
+    # 2) tempdir del sistema
+    tdir = tempfile.gettempdir()
+    if tdir and os.path.isdir(tdir):
+        cands.append(os.path.join(tdir, "hmeq.csv"))
+        try:
+            for d in os.listdir(tdir):
+                dp = os.path.join(tdir, d)
+                if os.path.isdir(dp):
+                    cands.append(os.path.join(dp, "hmeq.csv"))
+        except Exception:
+            pass
+
+    # 3) raíz típica de SAS Work en Linux (si existe)
+    for root in ("/saswork", "/var/tmp"):
+        if os.path.isdir(root):
+            cands.append(os.path.join(root, "hmeq.csv"))
+            # dos niveles como máximo
+            try:
+                for d in os.listdir(root):
+                    dp = os.path.join(root, d)
+                    if os.path.isdir(dp):
+                        cands.append(os.path.join(dp, "hmeq.csv"))
+                        for d2 in os.listdir(dp):
+                            dp2 = os.path.join(dp, d2)
+                            if os.path.isdir(dp2):
+                                cands.append(os.path.join(dp2, "hmeq.csv"))
+            except Exception:
+                pass
+
+    return cands
 
 
 def find_csv_path():
@@ -39,7 +89,7 @@ def find_csv_path():
       2) env HMEQ_CSV (archivo o URL http/https)
       3) ./hmeq.csv
       4) ./data/hmeq.csv
-      5) <SAS WORK>/hmeq.csv  (si está en variables de entorno)
+      5) &WORK/hmeq.csv (vía envs/TMP, con búsqueda 1–2 niveles)
     """
     cands = []
     if len(sys.argv) > 1:
@@ -47,24 +97,19 @@ def find_csv_path():
     if os.getenv("HMEQ_CSV"):
         cands.append(os.getenv("HMEQ_CSV"))
     cands += ["hmeq.csv", os.path.join("data", "hmeq.csv")]
-
-    # Detectar carpeta WORK de SAS si fue pasada a Python
-    for key in ("SAS_WORK", "SAS_WORK_PATH", "WORK", "TMPDIR"):
-        wk = os.getenv(key)
-        if wk:
-            cands.append(os.path.join(wk, "hmeq.csv"))
+    cands += _probe_work_paths()
 
     for p in cands:
         if not p:
             continue
-        if p.lower().startswith(("http://", "https://")):
-            return p
+        if isinstance(p, str) and p.lower().startswith(("http://", "https://")):
+            return p  # pandas puede leer URLs
         if os.path.isfile(p):
             return p
 
     raise FileNotFoundError(
-        "No se encontró el CSV. Pasá path/URL como arg, seteá HMEQ_CSV, "
-        "o dejá hmeq.csv en el cwd, ./data o en &WORK."
+        "No se encontró hmeq.csv. Pasá path/URL como arg, seteá HMEQ_CSV, "
+        "o dejá el archivo en el cwd, ./data o &WORK."
     )
 
 
@@ -73,9 +118,7 @@ def find_csv_path():
 # --------------------------
 def load_data():
     """Carga HMEQ desde CAS (si hay credenciales) o CSV/URL."""
-    use_cas = swat_available and (
-        os.getenv("CAS_USERNAME") and os.getenv("CAS_PASSWORD")
-    )
+    use_cas = swat_available and os.getenv("CAS_USERNAME") and os.getenv("CAS_PASSWORD")
 
     if use_cas:
         conn = None
