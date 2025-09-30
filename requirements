@@ -1,6 +1,0 @@
-pandas
-numpy
-scikit-learn
-joblib
-# opcional (solo si vas a leer desde CAS):
-swat
