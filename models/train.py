@@ -63,7 +63,7 @@ def _probe_work_paths():
             pass
 
     # 3) raíz típica de SAS Work en Linux (si existe)
-    for root in ("/saswork", "/var/tmp"):
+    for root in ("/sasuser", "/var/tmp"):
         if os.path.isdir(root):
             cands.append(os.path.join(root, "hmeq.csv"))
             # dos niveles como máximo
