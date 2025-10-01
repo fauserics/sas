@@ -1,5 +1,13 @@
 # VIYA REST
 
+# 1) Descargar binario (x86_64); no requiere root
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+chmod +x cloudflared
+
+# 2) Ejecutar el túnel hacia tu Streamlit local
+./cloudflared tunnel --url http://localhost:8501 --no-autoupdate
+
+
 mkdir -p ~/real-time-scoring && cd ~/real-time-scoring
 nano app.py
 
