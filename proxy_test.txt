@@ -1,6 +1,12 @@
 # VIYA REST
+filename tok "%sysfunc(getoption(WORK))/services_token.txt";
+data _null_;
+  file tok lrecl=32767;
+  put "%sysget(SAS_SERVICES_TOKEN)";
+run;
 
-#SAS
+
+
 %put NOTE: SAS_SERVICES_TOKEN=%sysget(SAS_SERVICES_TOKEN);
 %put NOTE: SAS_ACCESS_TOKEN=%sysget(SAS_ACCESS_TOKEN);
 
