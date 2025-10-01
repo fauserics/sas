@@ -477,7 +477,8 @@ if can_translate and sas_path:
         expected_auto = extract_expected_inputs_from_sas(raw_code)
         st.session_state.cat_levels = parse_categorical_levels_from_sas(raw_code)
         st.session_state.cat_levels_ci = build_cat_levels_ci(st.session_state.cat_levels)
-        combined_inputs = sorted(set((expected_from_json or []) | set(expected_auto or [])))
+        # ---- ÚNICO CAMBIO: forzar set en ambos lados antes del operador | ----
+        combined_inputs = sorted(set(expected_from_json or []) | set(expected_auto or []))
         combined_inputs = [c for c in combined_inputs if c.upper() != "BAD"]
         score_fn, py_code, expected = compile_sas_score(
             raw_code, func_name="sas_score",
