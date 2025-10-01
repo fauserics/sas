@@ -1,3 +1,8 @@
+env no_proxy=127.0.0.1,localhost \
+    firefox --new-window 'http://127.0.0.1:8501' &
+
+
+
 # Opción B: Chrome / Chromium
 google-chrome --new-window --no-proxy-server 'http://127.0.0.1:8501' &
 # o
