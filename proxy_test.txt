@@ -1,4 +1,12 @@
 # VIYA REST
+
+# ¿Llega a abrir TLS al host?
+curl -vkI --connect-timeout 10 https://disco-a20237-rg.gelenable.sas.com
+
+# ¿Responde el gateway de Viya?
+curl -vk --connect-timeout 10 "https://disco-a20237-rg.gelenable.sas.com/SASLogon/oauth/health"
+
+
 https://2azvvgp9rxjiqcyjrxltwy.streamlit.app/
 
 curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" \
