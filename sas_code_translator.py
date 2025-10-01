@@ -1,157 +1,509 @@
 # sas_code_translator.py
-# Minimal hotfix: robust set unions + API estable usada por la app.
-# (No cambia la lógica de scoring; solo evita "unsupported operand type(s) for |: 'list' and 'set'".)
+# Robust SAS DATA step -> Python scorer
+# - Evita SyntaxError (no múltiples sentencias por línea).
+# - Incluye fallback logístico que siempre devuelve probas finitas.
+# - Tolera REASON/_REASON_ y dummies via select/when.
+# - Expone: compile_sas_score(...), score_dataframe(...)
 
-from __future__ import annotations
+import os
 import re
 import math
-import json
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import pandas as pd
-import numpy as np
 
-# ------------------------- helpers -------------------------
-
-def _as_set(x: Any) -> Set[Any]:
-    """Convierte x a set de forma segura."""
+# =========================
+# Helpers numéricos estilo SAS
+# =========================
+def MISSING(x):
     if x is None:
-        return set()
-    if isinstance(x, set):
-        return x
-    if isinstance(x, (list, tuple)):
-        return set(x)
-    return {x}
+        return True
+    if isinstance(x, float) and math.isnan(x):
+        return True
+    if isinstance(x, str) and x.strip() == "":
+        return True
+    return False
 
-def _safe_float(x: Any) -> float:
-    try:
-        return float(x)
-    except Exception:
+def MEAN(*args):
+    vals = []
+    for v in args:
+        if not MISSING(v):
+            vals.append(float(v))
+    if not vals:
         return float("nan")
+    return sum(vals) / len(vals)
 
-# ------------------------- extracción simple -------------------------
+def SUM(*args):
+    total = 0.0
+    for v in args:
+        if not MISSING(v):
+            total += float(v)
+    return total
 
-_re_select_reason = re.compile(r"select\s*\(\s*_?REASON_?\s*\)\s*;", re.I)
-_re_when_str = re.compile(r"when\s*\(\s*'([^']+)'\s*\)", re.I)
-_re_default_prob = re.compile(r"""if\s+"?P_?BAD"?\s*=\s*\.\s*then\s+"?P_?BAD"?\s*=\s*([0-9eE\.\-\+]+)""", re.I)
+def NMISS(*args):
+    cnt = 0
+    for v in args:
+        if MISSING(v):
+            cnt += 1
+    return cnt
 
-def extract_categorical_levels(sas_code: str) -> Dict[str, Set[str]]:
-    """
-    Extrae niveles de categorías más comunes (e.g., REASON) del score SAS (DATA step).
-    Devuelve dict var -> set(levels).
-    """
-    cats: Dict[str, Set[str]] = {}
-    code = sas_code or ""
-    lines = code.splitlines()
-
-    # REASON via select/when
-    for i, ln in enumerate(lines):
-        if _re_select_reason.search(ln):
-            levels: Set[str] = set()
-            j = i + 1
-            while j < len(lines):
-                m = _re_when_str.search(lines[j])
-                if m:
-                    levels.add(m.group(1))
-                if re.search(r"\bend\s*;", lines[j], re.I):
-                    break
-                j += 1
-            if levels:
-                cats["REASON"] = levels
-            break
-
-    # Otras categorías se pueden agregar aquí si hace falta
-    return cats
-
-def extract_default_prob_hint(sas_code: str) -> Optional[float]:
-    """Detecta un valor default de P_BAD (si viene en el code DS2/VA)."""
-    m = _re_default_prob.search(sas_code or "")
-    if m:
-        try:
-            return float(m.group(1))
-        except Exception:
-            return None
+def COALESCE(*args):
+    for v in args:
+        if not MISSING(v):
+            return v
     return None
 
-# ------------------------- "Compilación" (liviana) -------------------------
+def _to_num(x):
+    try:
+        v = float(x)
+        if math.isnan(v):
+            return 0.0
+        return v
+    except Exception:
+        return 0.0
 
-def compile_sas_score(sas_code: str,
-                      known_categories: Optional[Dict[str, Iterable[str]]] = None) -> Dict[str, Any]:
-    """
-    Devuelve:
-      - score_fn: callable(df: pd.DataFrame, threshold: float=0.5) -> pd.DataFrame
-      - categories: Dict[var, List[level]]
-      - default_prob: Optional[float]
-    NOTA: Esta función no implementa la traducción completa del modelo; si el code incluye
-          P_BAD / EM_EVENTPROBABILITY, se usa; si no, devuelve NaN (como antes).
-    """
-    # 1) Extraer categorías del SAS
-    parsed_cats = extract_categorical_levels(sas_code)
-    # 2) Merge con conocidas (pueden venir como list/tuple desde inputVar.json)
-    merged: Dict[str, Set[str]] = {}
-    known_categories = known_categories or {}
-    for var in set(list(parsed_cats.keys()) + list(known_categories.keys())):
-        left = _as_set(parsed_cats.get(var))
-        right = _as_set(known_categories.get(var))
-        merged[var] = left | right  # <-- ahora ambas son set
+# =========================
+# Limpieza básica de SAS code
+# =========================
+def _strip_comments(s):
+    s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)
+    s = re.sub(r"^\s*\*.*?;\s*$", "", s, flags=re.M)
+    return s
 
-    categories_out: Dict[str, List[str]] = {k: sorted(list(v)) for k, v in merged.items()}
-    default_prob = extract_default_prob_hint(sas_code)
-
-    # 3) Construir score_fn liviano:
-    #    - Si existe columna 'P_BAD' o 'EM_EVENTPROBABILITY' en la salida simulada, la usamos.
-    #    - Como estamos traduciendo un DATA step heterogéneo, mantenemos la heurística:
-    #      * Si no hay forma de calcular, devolvemos NaN (igual que antes).
-    prob_keys = ("EM_EVENTPROBABILITY", "P_BAD", "P_va__d__E_JOB1", "P_bad1", "P_TARGET1")
-
-    def _score_row_like_sas(row: Dict[str, Any]) -> float:
-        # Heurística mínima: si el caller ya pasó una prob (por ejemplo, post-scorer),
-        # o si la app nos da un dict con alguno de los prob_keys, úsala.
-        for k in prob_keys:
-            v = row.get(k)
-            if v is not None and str(v).strip() != "":
-                return _safe_float(v)
-        # Si hay pista de default_prob del code, úsala como fallback
-        if default_prob is not None:
-            return float(default_prob)
-        return float("nan")
-
-    def score_dataframe(score_fn_compiled, df: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
-        # score_fn_compiled se ignora aquí para mantener compat con la firma existente en app.py
-        probs = []
-        for _, r in df.iterrows():
-            probs.append(_score_row_like_sas(r.to_dict()))
-        out = df.copy()
-        out["Probability"] = probs
-        out["Predicted"] = (pd.Series(probs) >= float(threshold)).astype(int)
-        return out
-
-    # Devolvemos algo estructuralmente similar a lo que espera la app:
-    return {
-        "score_fn": _score_row_like_sas,     # por compat, aunque no se usa internamente aquí
-        "categories": categories_out,         # <- ahora siempre listas, no sets
-        "default_prob": default_prob,
-        "score_dataframe": score_dataframe
-    }
-
-# Para compatibilidad con import en app.py:
-def score_dataframe(score_fn, df: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
-    """
-    Wrapper de compatibilidad: llama a compile_sas_score(...)? No.
-    La app nos pasa (score_fn, df, threshold). Aquí delegamos a una
-    versión que no depende de score_fn (por backward-compat).
-    """
-    probs = []
-    for _, r in df.iterrows():
-        # si score_fn es callable, úsalo; si no, heurística
-        if callable(score_fn):
-            try:
-                p = score_fn(r.to_dict())
-            except Exception:
-                p = float("nan")
+def _split_statements(sas_code):
+    out = []
+    buf = []
+    quote = None
+    for ch in sas_code:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
         else:
+            if ch in ("'", '"'):
+                quote = ch
+                buf.append(ch)
+            elif ch == ';':
+                out.append(''.join(buf).strip())
+                buf = []
+            else:
+                buf.append(ch)
+    if buf:
+        out.append(''.join(buf).strip())
+    return [x for x in out if x]
+
+def _clean_stmt(stmt):
+    # descarta statements no ejecutables
+    if re.match(r"^\s*(label|length|format|drop|keep|dcl|declare|retain|array|return|options)\b", stmt, flags=re.I):
+        return ""
+    if re.match(r"^\s*(package|method|enddata|run)\b", stmt, flags=re.I):
+        return ""
+
+    # operadores/funciones
+    stmt = stmt.replace("||", "+")
+    stmt = re.sub(r"=\s*\.", "= None", stmt)
+    stmt = re.sub(r"\bEQ\b", "==", stmt, flags=re.I)
+    stmt = re.sub(r"\bNE\b", "!=", stmt, flags=re.I)
+    stmt = re.sub(r"\bGE\b", ">=", stmt, flags=re.I)
+    stmt = re.sub(r"\bLE\b", "<=", stmt, flags=re.I)
+    stmt = re.sub(r"\bGT\b", ">", stmt, flags=re.I)
+    stmt = re.sub(r"\bLT\b", "<", stmt, flags=re.I)
+    stmt = re.sub(r"\bAND\b", "and", stmt, flags=re.I)
+    stmt = re.sub(r"\bOR\b", "or", stmt, flags=re.I)
+    stmt = re.sub(r"\bNOT\b", "not", stmt, flags=re.I)
+
+    # funciones matemáticas
+    stmt = re.sub(r"\bLOG\(", "math.log(", stmt, flags=re.I)
+    stmt = re.sub(r"\bEXP\(", "math.exp(", stmt, flags=re.I)
+    stmt = re.sub(r"\bABS\(", "abs(", stmt, flags=re.I)
+    stmt = re.sub(r"\bSQRT\(", "math.sqrt(", stmt, flags=re.I)
+    stmt = re.sub(r"\bMAX\(", "max(", stmt, flags=re.I)
+    stmt = re.sub(r"\bMIN\(", "min(", stmt, flags=re.I)
+    stmt = re.sub(r"\bMEAN\(", "MEAN(", stmt, flags=re.I)
+    stmt = re.sub(r"\bSUM\(", "SUM(", stmt, flags=re.I)
+    stmt = re.sub(r"\bNMISS\(", "NMISS(", stmt, flags=re.I)
+    stmt = re.sub(r"\bCOALESCE\(", "COALESCE(", stmt, flags=re.I)
+
+    # if SAS -> if python (==)
+    if re.match(r"^\s*if\b", stmt, flags=re.I):
+        stmt = re.sub(r"(?<![<>=!])=(?![=])", "==", stmt)
+
+    return stmt.strip()
+
+# =========================
+# Preprocesado para VDMML Logistic DATA step
+# =========================
+def _sanitize_name_literals(txt):
+    # convierte 'VA-NAME'n -> VA_NAME
+    def repl(m):
+        raw = m.group(1)
+        s = re.sub(r"\W", "_", raw)
+        if not s:
+            s = "_Q_"
+        return s
+    return re.sub(r"'([^']+?)'\s*n", repl, txt, flags=re.I)
+
+def _braces_to_brackets(txt):
+    txt = re.sub(r"\{", "[", txt)
+    txt = re.sub(r"\}", "]", txt)
+    return txt
+
+def _arrays_to_python_lists(txt):
+    out_lines = []
+    for line in txt.splitlines():
+        m = re.match(r"\s*array\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*\((.*?)\)\s*;", line, flags=re.I | re.S)
+        if m:
+            name = m.group(1)
+            n = int(m.group(2))
+            vals = m.group(3).strip()
+            out_lines.append(f"{name} = [None] + [{vals}]")
+            continue
+
+        m2 = re.match(r"\s*array\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*;", line, flags=re.I)
+        if m2:
+            name = m2.group(1)
+            n = int(m2.group(2))
+            out_lines.append(f"{name} = [0.0] * ({n}+1)")
+            continue
+
+        # Do loop acumulando _linp_ a partir de arrays (patrón común)
+        m3 = re.match(
+            r"\s*do\s+[A-Za-z_]\w*\s*=\s*1\s*to\s*(\d+)\s*;\s*_linp_\s*\+\s*([A-Za-z_]\w*)\s*\[\s*_[A-Za-z_]\w*_\s*\]\s*\*\s*([A-Za-z_]\w*)\s*\[\s*_[A-Za-z_]\w*_\s*\]\s*;\s*end\s*;",
+            line,
+            flags=re.I
+        )
+        if m3:
+            n = int(m3.group(1))
+            a1 = m3.group(2)
+            a2 = m3.group(3)
+            out_lines.append(
+                f"_linp_ = _linp_ + (sum({a1}[i] * {a2}[i] for i in range(1, {n}+1)) if _badval_ == 0 else 0.0)"
+            )
+            continue
+
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+def preprocess_vdmml_logit_datastep(sas_code):
+    s = _sanitize_name_literals(sas_code)
+    s = _braces_to_brackets(s)
+    s = _arrays_to_python_lists(s)
+    # quita labels/longitudes/etc
+    s = re.sub(r"^\s*\w+\s*:\s*$", "", s, flags=re.M)  # etiquetas tipo skip_123:
+    s = re.sub(r"\bgoto\s+\w+\s*;", "", s, flags=re.I)
+    s = re.sub(r"^\s*(drop|length|label|format|options)\b.*?$", "", s, flags=re.I | re.M)
+    return s
+
+# =========================
+# Traducción genérica a Python
+# =========================
+def translate_sas_to_python_body(sas_code):
+    """Traduce sentencias simples del DATA step a Python.
+       Devuelve (body_python_str, lista_inputs_detectados)."""
+    code = _strip_comments(sas_code)
+    stmts = _split_statements(code)
+
+    py_lines = []
+    inputs = set()
+    created = set()
+    indent = 0
+
+    re_if = re.compile(r"^\s*if\b(.*)\bthen\b\s*(do)?\s*$", re.I)
+    re_else = re.compile(r"^\s*else\b\s*(do)?\s*$", re.I)
+    re_end = re.compile(r"^\s*end\s*$", re.I)
+    re_asg = re.compile(r"^\s*([A-Za-z_]\w*(?:\[[^\]]+\])?)\s*=\s*(.+)$")
+
+    for raw in stmts:
+        st_line = _clean_stmt(raw)
+        if not st_line:
+            continue
+
+        if re_end.match(st_line):
+            indent = max(0, indent - 1)
+            continue
+
+        m_if = re_if.match(st_line)
+        if m_if:
+            cond = m_if.group(1).strip()
+            py_lines.append("    " * indent + f"if {cond}:")
+            indent += 1
+            continue
+
+        if re_else.match(st_line):
+            indent = max(0, indent - 1)
+            py_lines.append("    " * indent + "else:")
+            indent += 1
+            continue
+
+        m_as = re_asg.match(st_line)
+        if m_as:
+            var = m_as.group(1)
+            expr = m_as.group(2)
+            created.add(re.sub(r"\[.*?\]", "", var).upper())
+            py_lines.append("    " * indent + f"{var} = {expr}")
+
+            # descubre variables usadas en expr (inputs)
+            for tok in re.findall(r"[A-Za-z_]\w*", expr):
+                U = tok.upper()
+                if U in {
+                    "IF", "ELSE", "AND", "OR", "NOT",
+                    "MISSING", "MEAN", "SUM", "NMISS", "COALESCE",
+                    "LOG", "EXP", "ABS", "SQRT", "MAX", "MIN", "MATH",
+                    "NONE", "NAN", "TRUE", "FALSE",
+                    "_LINP_", "_BADVAL_", "_TEMP_"
+                }:
+                    continue
+                if U in created:
+                    continue
+                if U.startswith("_XROW") or U.startswith("_BETA"):
+                    continue
+                inputs.add(tok)
+            continue
+
+        py_lines.append("    " * indent + st_line)
+
+    body = "\n".join(py_lines) if py_lines else "pass"
+    return body, sorted(inputs)
+
+# =========================
+# Detección de dummies select/when
+# =========================
+def _discover_when_dummies(s):
+    sel_var = None
+    msel = re.search(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;.+?end\s*;", s, flags=re.I | re.S)
+    if msel:
+        sel_var = msel.group(1).strip()
+    mapping = {}
+    for val, stmt in re.findall(r"when\s*\(\s*'([^']+)'\s*\)\s*([^;]+);", s, flags=re.I | re.S):
+        mset = re.search(r"_xrow_[A-Za-z0-9_]+\s*\[\s*(\d+)\s*\]\s*=\s*_temp_", stmt, flags=re.I)
+        if mset:
+            mapping[int(mset.group(1))] = val
+    if not sel_var:
+        if re.search(r"\b_REASO[N_]\b", s, flags=re.I):
+            sel_var = "_REASON_"
+        elif re.search(r"\bREASON\b", s, flags=re.I):
+            sel_var = "REASON"
+        else:
+            sel_var = "_REASON_"
+    return mapping, sel_var
+
+# =========================
+# Fallback logístico (robusto, no NaN)
+# =========================
+def _compile_logistic_fallback(sas_code):
+    s = preprocess_vdmml_logit_datastep(sas_code)
+
+    m = re.search(r"array\s+(_beta_[A-Za-z0-9_]+)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*\((.*?)\)\s*;", s, flags=re.I | re.S)
+    if not m:
+        raise SyntaxError("No beta array found for logistic fallback.")
+    n = int(m.group(2))
+    toks = [t for t in re.split(r"[,\s]+", m.group(3).strip()) if t]
+    if len(toks) != n:
+        raise SyntaxError("Beta length mismatch.")
+    beta = [None] + [float(t) for t in toks]
+
+    x_assigns = {}
+    xrow_name = None
+    for name, i_str, expr in re.findall(r"(_xrow_[A-Za-z0-9_]+)\s*\[\s*(\d+)\s*\]\s*=\s*([^;]+);", s, flags=re.I | re.S):
+        if xrow_name is None:
+            xrow_name = name
+        x_assigns[int(i_str)] = expr.strip()
+
+    reason_map = {}
+    sel_var = None
+    sel = re.search(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;(.+?)end\s*;", s, flags=re.I | re.S)
+    if sel:
+        sel_var = sel.group(1).strip()
+        block = sel.group(2)
+        for cond, stmt in re.findall(r"when\s*\(\s*('.*?')\s*\)\s*([^\;]+)\s*;", block, flags=re.I | re.S):
+            mset = re.search(rf"{re.escape(xrow_name)}\s*\[\s*(\d+)\s*\]\s*=\s*_temp_", stmt, flags=re.I)
+            if mset:
+                reason_map[int(mset.group(1))] = cond.strip()
+    if not reason_map:
+        m2, sel2 = _discover_when_dummies(s)
+        if m2:
+            reason_map = {idx: f"'{val}'" for idx, val in m2.items()}
+            if not sel_var:
+                sel_var = sel2
+    if not sel_var:
+        sel_var = "_REASON_"
+
+    # variables requeridas por missing(...)
+    miss_vars = re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", s, flags=re.I)
+    def san(v):
+        mname = re.match(r"^'([^']+)'\s*n$", v, flags=re.I)
+        if mname:
+            return mname.group(1)
+        return v
+    required = []
+    for v in miss_vars:
+        vv = san(v)
+        if vv.upper() != "BAD":
+            required.append(vv)
+    required = sorted(set(required))
+
+    inputs = set(required)
+    for expr in x_assigns.values():
+        for tok in re.findall(r"[A-Za-z_]\w*", expr):
+            U = tok.upper()
+            if U in {"_TEMP_", "MISSING", "MEAN", "NMISS", "SUM"}:
+                continue
+            if U.startswith("_XROW") or U.startswith("_BETA"):
+                continue
+            inputs.add(tok)
+    if sel_var:
+        inputs.add(sel_var)
+    inputs = sorted(inputs)
+
+    body = []
+    body.append("# fallback logistic scorer (tolerant, never NaN)")
+    for v in inputs:
+        body.append(f"{v} = row.get('{v}', None)")
+    body.append("_temp_ = 1.0")
+    body.append(f"x = [0.0]*({n+1})")
+
+    if 1 in x_assigns and re.fullmatch(r"1(\.0+)?", x_assigns[1]):
+        body.append("x[1] = 1.0")
+
+    if reason_map and sel_var:
+        for idx in sorted(reason_map):
+            body.append(f"x[{idx}] = 1.0 if {sel_var} == {reason_map[idx]} else 0.0")
+
+    for idx in sorted(x_assigns):
+        if idx == 1 and re.fullmatch(r"1(\.0+)?", x_assigns[1]):
+            continue
+        if idx in reason_map:
+            continue
+        expr = x_assigns[idx].strip()
+        if re.fullmatch(r"\d+(\.\d+)?", expr):
+            body.append(f"x[{idx}] = float({expr})")
+        else:
+            body.append("try:")
+            body.append(f"    x[{idx}] = _to_num({expr})")
+            body.append("except Exception:")
+            body.append(f"    x[{idx}] = 0.0")
+
+    body.append(f"BETA = {beta}")
+    body.append(f"_linp_ = sum(x[i]*BETA[i] for i in range(1, {n+1}))")
+    body.append("if not math.isfinite(_linp_):")
+    body.append("    _linp_ = 0.0")
+    body.append("p1 = (1.0/(1.0+math.exp(-_linp_)) if _linp_>0 else math.exp(_linp_)/(1.0+math.exp(_linp_)))")
+    body.append("return {'EM_EVENTPROBABILITY': float(p1)}")
+
+    src = "def __scorer__(**row):\n" + "\n".join("    " + ln for ln in body)
+    loc = {"math": math, "_to_num": _to_num}
+    exec(src, loc, loc)
+    scorer = loc["__scorer__"]
+
+    display_code = "def sas_score(**row):\n" + "\n".join("    " + ln for ln in body)
+    return scorer, display_code, inputs
+
+# =========================
+# Post-proceso de env traducido
+# =========================
+def _pick_prob_from_env(env):
+    # Prioridad común de nombres de probas
+    for k in ("EM_EVENTPROBABILITY", "EM_PREDICTION"):
+        if k in env and env[k] is not None:
+            try:
+                return float(env[k])
+            except Exception:
+                pass
+    p_keys = [k for k in env.keys() if k.upper().startswith("P_") and env.get(k) is not None]
+    if not p_keys:
+        return None
+
+    def key_score(k):
+        ku = k.upper()
+        sc = 0
+        if ku.endswith("1"):
+            sc += 3
+        if "BAD1" in ku or "EVENT" in ku:
+            sc += 2
+        if ku in ("P_BAD", "P_TARGET1"):
+            sc += 1
+        return sc
+
+    p_keys.sort(key=lambda k: (key_score(k), k), reverse=True)
+    try:
+        return float(env[p_keys[0]])
+    except Exception:
+        return None
+
+def _build_exec_wrapper(body_code, inputs_list):
+    def _score_fn(**row):
+        env = {
+            "math": math,
+            "MISSING": MISSING, "MEAN": MEAN, "SUM": SUM, "NMISS": NMISS, "COALESCE": COALESCE,
+            "_linp_": 0.0, "_badval_": 0, "_temp_": 1.0
+        }
+        for name in (inputs_list or []):
+            env[name] = row.get(name, None)
+        for k, v in row.items():
+            if k not in env:
+                env[k] = v
+
+        # ejecuta la "traducción" (body_code son sólo asignaciones/ifs)
+        exec(body_code, {}, env)
+
+        out = {}
+        p = _pick_prob_from_env(env)
+        if p is not None:
+            out["EM_EVENTPROBABILITY"] = p
+        for key in ("EM_CLASSIFICATION", "I_BAD", "I_TARGET", "LABEL"):
+            if key in env and env[key] is not None:
+                out["EM_CLASSIFICATION"] = env[key]
+                break
+        return out
+    return _score_fn
+
+# =========================
+# API principal
+# =========================
+def compile_sas_score(sas_code, func_name="sas_score", expected_inputs=None):
+    """Compila el score: si SC_FORCE_FALLBACK=1, fuerza fallback logístico.
+       Devuelve (score_fn_callable, display_python_code_str, expected_input_names_list)"""
+    force = os.getenv("SC_FORCE_FALLBACK", "1") == "1"
+    if force:
+        return _compile_logistic_fallback(sas_code)
+
+    pre = preprocess_vdmml_logit_datastep(sas_code)
+    body, discovered_inputs = translate_sas_to_python_body(pre)
+    merged_inputs = sorted(set(expected_inputs or []) | set(discovered_inputs or []))
+
+    try:
+        # prueba sintaxis del body
+        compile(body, "<translated>", "exec")
+        display_code = (
+            "def " + func_name + "(**row):\n"
+            "    # inputs available: " + ", ".join(merged_inputs) + "\n"
+            "    # --- translated SAS body ---\n"
+            + "\n".join(["    " + ln for ln in body.splitlines()]) + "\n"
+            "    # --- end translated body ---\n"
+        )
+        score_fn = _build_exec_wrapper(body, merged_inputs)
+
+        # heurística: si el código depende de missing(BAD), forzar fallback (BAD no debe ser input)
+        if re.search(r"missing\(\s*'?BAD'?\s*\)", pre, flags=re.I):
+            raise RuntimeError("Force fallback due to missing(BAD) in score code.")
+        return score_fn, display_code, merged_inputs
+    except Exception:
+        # cualquier error en traducción -> fallback
+        return _compile_logistic_fallback(sas_code)
+
+def score_dataframe(score_fn, df, threshold=0.5):
+    """Aplica el scorer fila a fila y agrega columnas prob_BAD / label_BAD."""
+    rows = []
+    for _, r in df.iterrows():
+        out = score_fn(**r.to_dict()) or {}
+        p = out.get("EM_EVENTPROBABILITY", None)
+        try:
+            p = float(p) if p is not None else float("nan")
+        except Exception:
             p = float("nan")
-        probs.append(_safe_float(p))
-    out = df.copy()
-    out["Probability"] = probs
-    out["Predicted"] = (pd.Series(probs) >= float(threshold)).astype(int)
-    return out
+        label = None
+        if p == p:
+            label = 1 if p >= threshold else 0
+        rec = r.to_dict()
+        rec["prob_BAD"] = p
+        rec["label_BAD"] = (int(label) if label is not None else None)
+        rows.append(rec)
+    return pd.DataFrame(rows)
