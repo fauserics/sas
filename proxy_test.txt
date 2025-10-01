@@ -1,3 +1,11 @@
+cd /home/cloud-user
+ls -ld real-time-scoring*
+# si no existe real-time-scoring actual:
+mv real-time-scoring.bak.20251001-181056 real-time-scoring
+ls -ld real-time-scoring
+
+
+
 # en la VM (ejemplo con password grant; usa tu flujo real)
 TOKEN=$(curl -s -u sas.ec: \
   -d "grant_type=password&username=$VIYA_USER&password=$VIYA_PASSWORD" \
