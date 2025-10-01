@@ -1,3 +1,11 @@
+# DNS
+getent hosts "$CAS_HOST" || echo "DNS FAIL"
+
+# Si vas por Ingress (recomendado): 443
+nc -vz -w 3 "$CAS_HOST" 443 || echo "TCP 443 FAIL"
+
+
+
 # en la VM# A) DNS (3s)
 # Ver VIYA_URL y extraer el host
 echo "$VIYA_URL"
