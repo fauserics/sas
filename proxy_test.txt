@@ -1,5 +1,9 @@
 # VIYA REST
 
+mkdir -p ~/real-time-scoring && cd ~/real-time-scoring
+nano app.py
+
+
 streamlit>=1.31,<2
 pandas>=2.0,<3
 requests>=2.31,<3
@@ -16,8 +20,6 @@ pip install openai
 
 
 export OPENAI_API_KEY =" "
-
--proj-v_nNuF3vmvqmYh8vqKGKzhjsX4xPm70TC1WxxDQUthlrdBqIGg1ltRZKLo2CR8mjCkSDyrrh5wT3BlbkFJXa-KSgOzAinVwVnUiJXzB9wr1ZoB5fFqhjmyQnMsvqgfmN7Aqe48lowY_xPNZnTcMAteOUDbUA
 
 export LLM_MODEL="gpt-4o-mini"
 
