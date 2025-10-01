@@ -1,5 +1,34 @@
 # VIYA REST
 
+python -m venv .venv
+source .venv/bin/activate          
+pip install -r requirements.txt
+
+export OPENAI_API_KEY =" "
+
+-proj-v_nNuF3vmvqmYh8vqKGKzhjsX4xPm70TC1WxxDQUthlrdBqIGg1ltRZKLo2CR8mjCkSDyrrh5wT3BlbkFJXa-KSgOzAinVwVnUiJXzB9wr1ZoB5fFqhjmyQnMsvqgfmN7Aqe48lowY_xPNZnTcMAteOUDbUA
+
+export LLM_MODEL="gpt-4o-mini"
+
+export VIYA_URL = "https://disco-a20237-rg.gelenable.sas.com"
+export MAS_MODULE_ID = "gradient_boosting__interactive-m"
+export VIYA_USER = "geldmui@gelenable.sas.com"
+export BEARER_TOKEN = """eyJqa3UiOiJodHRwczovL2Rpc2NvLWEyMDIzNy1yZy5nZWxlbmFibGUuc2FzLmNvbS9TQVNMb2dvbi90b2tlbl9rZXlzIiwia2lkIjoibGVnYWN5LXRva2VuLWtleSIsInR5cCI6IkpXVCIsImFsZyI6IlJTMjU2In0.eyJzdWIiOiJlOWViNTgxOS03NTNiLTQ1MGEtODBhMS03YmJkNzY2OWQ3MTYiLCJ1c2VyX25hbWUiOiJnZWxkbXVpQGdlbGVuYWJsZS5zYXMuY29tIiwib3JpZ2luIjoibGRhcCIsImlzcyI6Imh0dHBzOi8vZGlzY28tYTIwMjM3LXJnLmdlbGVuYWJsZS5zYXMuY29tL1NBU0xvZ29uL29hdXRoL3Rva2VuIiwiYXV0aG9yaXRpZXMiOlsiU0FTQWRtaW5pc3RyYXRvcnMiLCJHRUwgVGVzdCBVc2VycyIsIkNBU0hvc3RBY2NvdW50UmVxdWlyZWQiXSwiY2xpZW50X2lkIjoic2FzLmxhdW5jaGVyIiwiYXVkIjpbInNhcy5sYXVuY2hlciIsInVhYSJdLCJleHRfaWQiOiJjbj1HRUwgRGF0YSBNYW5hZ2VtZW50IFVJIFVzZXIsb3U9QUFEREMgVXNlcnMsZGM9Z2VsZW5hYmxlLGRjPXNhcyxkYz1jb20iLCJ6aWQiOiJ1YWEiLCJncmFudF90eXBlIjoidXJuOmlldGY6cGFyYW1zOm9hdXRoOmdyYW50LXR5cGU6and0LWJlYXJlciIsInVzZXJfaWQiOiJlOWViNTgxOS03NTNiLTQ1MGEtODBhMS03YmJkNzY2OWQ3MTYiLCJhenAiOiJzYXMubGF1bmNoZXIiLCJzY29wZSI6WyJ1YWEudXNlciIsIlNBU0FkbWluaXN0cmF0b3JzIl0sImV4cCI6MTc1OTI5NTQ2MCwiaWF0IjoxNzU5MjkxODYwLCJqdGkiOiI1NDQ1YWVjYzExYzI0YmYwODZjYjhmYTIyNDhlMTY3YyIsImVtYWlsIjoiZ2VsZG11aUBnZWxlbmFibGUuc2FzLmNvbSIsInJldl9zaWciOiIxYTUxNDIzZSIsImNpZCI6InNhcy5sYXVuY2hlciJ9.14crc-hcpGLO0rynVwrbERCoBP4PGOgCJf_3QaG7IC7fSYN1DErH8hZOBUrsiVNrU5cGd9LIwcP_9__qUxzYlpstOxgzY2RrJwBSzBtnQg3FUxEds6CZzMQjwC8wX8vnlAVIUjAJwBazVhKIwNXmJ1XwtJJeHafl5nNmPPEWRpjvrQMJaUJwiGMLlct72t1NwA1PKDzWUbW0kHAG8JRIiFkcZgcDdoN-cU8dhyCFEk70LCX-b5YF_TJF7qd66IGzs1j_NxuABqlsVbvZWsz7HGoksLmSO69FRqsiN9XYSTlA8CHwnVEs-Y7jazn1j6THTddzM9pqcEBODuN-FcBNNQ
+"""
+export VIYA_TLS_VERIFY = "1"
+
+# Bypass el proxy para este host/dominio
+NO_PROXY = "disco-a20237-rg.gelenable.sas.com,.gelenable.sas.com,localhost,127.0.0.1"
+
+# (Opcional) fuerza no usar proxy en el cliente Viya
+export VIYA_FORCE_NO_PROXY = "1"
+
+# (Opcional) subí timeouts por si la red es lenta
+export VIYA_TIMEOUT_CONNECT = "60"
+export VIYA_TIMEOUT_READ = "120"
+
+
+
 nslookup disco-a20237-rg.gelenable.sas.com
 curl -v https://disco-a20237-rg.gelenable.sas.com/SASLogon/login --max-time 10
 
