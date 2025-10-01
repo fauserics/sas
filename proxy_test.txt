@@ -1,3 +1,14 @@
+curl -s -m 10 -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"inputs":[
+        {"name":"REASON","value":"DebtCon"},
+        {"name":"_REASON_","value":"DebtCon"},
+        {"name":"LOAN","value":10000}
+      ]}' \
+  "$VIYA_URL/microanalyticScore/modules/$MAS_MODULE_ID/steps/score" | python3 -m json.tool
+
+
+
+
 curl -s -H "Authorization: Bearer $TOKEN" \
   "$VIYA_URL/microanalyticScore/modules/$MAS_MODULE_ID" | python3 -m json.tool | head -n 50
 
