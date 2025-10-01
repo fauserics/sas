@@ -477,7 +477,7 @@ if can_translate and sas_path:
         expected_auto = extract_expected_inputs_from_sas(raw_code)
         st.session_state.cat_levels = parse_categorical_levels_from_sas(raw_code)
         st.session_state.cat_levels_ci = build_cat_levels_ci(st.session_state.cat_levels)
-        # ---- ÚNICO CAMBIO: forzar set en ambos lados antes del operador | ----
+        # ---- FIX: forzar set en ambos lados antes del operador | ----
         combined_inputs = sorted(set(expected_from_json or []) | set(expected_auto or []))
         combined_inputs = [c for c in combined_inputs if c.upper() != "BAD"]
         score_fn, py_code, expected = compile_sas_score(
@@ -591,6 +591,28 @@ with tabs[1]:
     row_rest = build_single_record_form(fields, sample_df, st.session_state.cat_levels_ci, key_prefix="viya_single")
 
     st.markdown("## 3) Score on Viya (REST)")
+
+    # --- PRE-FLIGHT (solo si Debug ON) ---
+    if st.session_state.get("debug"):
+        import os as _os, socket as _socket, requests as _requests
+        st.caption("Debug — Viya preflight")
+        try:
+            _host = _os.getenv("VIYA_URL","").split("://")[-1].split("/")[0]
+            _dns = _socket.getaddrinfo(_host, 443)
+            st.write("DNS OK →", _dns[:1])
+        except Exception as _ex:
+            st.error(f"DNS failed: {_ex}")
+        try:
+            _url = _os.getenv("VIYA_URL","").rstrip("/") + "/SASLogon/login"
+            _r = _requests.get(
+                _url,
+                timeout=float(_os.getenv("VIYA_TIMEOUT","10")),
+                verify=(_os.getenv("VIYA_CA_BUNDLE") or True),
+            )
+            st.write("SASLogon status:", _r.status_code)
+        except Exception as _ex:
+            st.error(f"SASLogon preflight failed: {_ex}")
+
     do_rest  = st.button("Score on Viya (REST)", use_container_width=True, key="btn_viya_single")
 
     if do_rest:
