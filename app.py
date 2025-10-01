@@ -5,6 +5,7 @@
 #  2) Viya REST: call MAS scoring endpoint
 
 import os
+import re
 import json
 import pandas as pd
 import streamlit as st
@@ -56,6 +57,27 @@ def load_input_vars() -> list[str]:
     except Exception:
         pass
     return []
+
+def _sanitize_var(v: str) -> str:
+    # 'VAR'n -> VAR ; quitar no-alfanum (-> _)
+    v = v.strip()
+    m = re.match(r"^'([^']+)'\s*n$", v, flags=re.I)
+    if m:
+        v = m.group(1)
+    v = re.sub(r"\W", "_", v)
+    return v
+
+def extract_expected_inputs_from_sas(code: str) -> list[str]:
+    # toma variables del bloque: if missing(A) or missing(B) ... then do;
+    miss_names = set(_sanitize_var(x) for x in re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", code, flags=re.I))
+    # si se usan categorías REASON, agrégalo
+    if re.search(r"\bREASON\b", code, flags=re.I):
+        miss_names.add("REASON")
+    # filtra temporales / outputs típicos
+    drop_prefixes = ("_", "EM_", "P_", "I_", "va__d__E_")
+    keep = [n for n in miss_names if n and not n.upper().startswith(drop_prefixes)]
+    # orden estable
+    return sorted(keep, key=str.upper)
 
 @st.cache_data
 def load_sample_df(expected_cols: list[str]) -> pd.DataFrame:
@@ -170,18 +192,21 @@ with col_t2:
 
 sas_is_ds2 = False
 if can_translate and sas_path:
-    code = load_file_text(sas_path)
-    sas_is_ds2 = is_ds2_astore(code)
+    raw_code = load_file_text(sas_path)
+    sas_is_ds2 = is_ds2_astore(raw_code)
     if sas_is_ds2:
         st.warning("This SAS file looks like DS2/ASTORE (e.g., scoreRecord). Translation is not supported. Use 'Score on Viya (REST)'.")
     else:
         try:
+            # si no hay inputVar.json, inferí los inputs del bloque missing(...)
+            expected_auto = extract_expected_inputs_from_sas(raw_code)
             score_fn, py_code, expected = compile_sas_score(
-                code, func_name="sas_score", expected_inputs=(expected_from_json or None)
+                raw_code, func_name="sas_score",
+                expected_inputs=(expected_from_json or expected_auto or None)
             )
             st.session_state.score_fn = score_fn
             st.session_state.score_py = py_code
-            st.session_state.expected_cols = expected_from_json or expected or []
+            st.session_state.expected_cols = expected_from_json or expected_auto or expected or []
             st.success(f"Translation OK. Found {len(st.session_state.expected_cols)} input fields.")
         except Exception as e:
             st.error(f"Translation failed: {e}")
