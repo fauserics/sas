@@ -1,6 +1,6 @@
 # sas_code_translator.py
 # Translate SAS DATA step scoring code -> Python function.
-# Robust logistic fallback (no indent blocks) for VDMML exports.
+# Fallback logístico tolerante a faltantes (si faltan valores, usa 0.0 / sin dummies).
 
 import re, math
 import pandas as pd
@@ -8,7 +8,7 @@ from typing import Callable, List, Tuple
 
 # ===== runtime helpers =====
 def MISSING(x):
-    return x is None or (isinstance(x, float) and math.isnan(x)) or (isinstance(x, str) and x == "")
+    return x is None or (isinstance(x, float) and math.isnan(x)) or (isinstance(x, str) and x.strip() == "")
 
 def MEAN(*args):
     vals = [float(v) for v in args if not MISSING(v)]
@@ -173,16 +173,15 @@ def translate_sas_to_python_body(sas_code: str) -> Tuple[str, List[str]]:
     body = "\n".join(py_lines) if py_lines else "pass"
     return body, sorted(inputs)
 
-# ===== logistic fallback (plano, sin indent) =====
+# ===== logistic fallback (tolerante a faltantes) =====
 def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]:
     s = preprocess_vdmml_logit_datastep(sas_code)
 
     m = re.search(r"array\s+(_beta_[A-Za-z0-9_]+)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*\((.*?)\)\s*;", s, flags=re.I|re.S)
     if not m:
         raise SyntaxError("No beta array found for logistic fallback.")
-    beta_name, n_str, beta_vals = m.group(1), m.group(2), m.group(3)
-    n = int(n_str)
-    toks = [t for t in re.split(r"[,\s]+", beta_vals.strip()) if t]
+    n = int(m.group(2))
+    toks = [t for t in re.split(r"[,\s]+", m.group(3).strip()) if t]
     if len(toks) != n:
         raise SyntaxError("Beta length mismatch.")
     beta = [None] + [float(t) for t in toks]
@@ -203,13 +202,14 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
             if mset:
                 reason_map[int(mset.group(1))] = cond.strip()
 
+    # requeridas (pero NO cortamos si faltan)
     miss_vars = re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", s, flags=re.I)
     def san(v):
         m = re.match(r"^'([^']+)'\s*n$", v, flags=re.I)
         return m.group(1) if m else v
-    # NO exigir BAD
     required = sorted({san(v) for v in miss_vars if san(v).upper() != "BAD"})
 
+    # inputs potenciales
     inputs = set(required)
     for expr in x_assigns.values():
         for tok in re.findall(r"[A-Za-z_]\w*", expr):
@@ -219,23 +219,23 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
     if sel_var: inputs.add(sel_var)
     inputs = sorted(inputs)
 
+    # construir scorer tolerante
     body = []
-    body.append("# fallback logistic scorer (flat)")
+    body.append("# fallback logistic scorer (tolerant to missing)")
+    # cargar entradas (si falta -> None)
     for v in inputs:
         body.append(f"{v} = row.get('{v}', None)")
-    if required:
-        checks = " or ".join([f"{v} is None" for v in required])
-        body.append(f"if {checks}:")
-        body.append("    return {'EM_EVENTPROBABILITY': None}")
-
+    # construir x
     body.append(f"x = [0.0]*({n+1})")
     if 1 in x_assigns and re.fullmatch(r"1(\.0+)?", x_assigns[1]):
         body.append("x[1] = 1.0")
+    # dummies por select/when
     if reason_map and sel_var:
         for idx in sorted(reason_map):
             body.append(f"x[{idx}] = 1.0 if {sel_var} == {reason_map[idx]} else 0.0")
+    # resto de columnas
     for idx in sorted(x_assigns):
-        if idx == 1 and re.fullmatch(r"1(\.0+)?", x_assigns[1]):
+        if idx == 1 and re.fullmatch(r"1(\.0+)?", x_assigns[1]):  # intercepto
             continue
         if idx in reason_map:
             continue
@@ -283,36 +283,10 @@ def compile_sas_score(sas_code: str, func_name: str = "sas_score", expected_inpu
 
     merged_inputs = sorted(set(expected_inputs or []) | set(discovered_inputs or []))
 
-    if re.search(r"missing\(\s*'?BAD'?\s*\)", pre, flags=re.I):
-        scorer, display_code, fb_inputs = _compile_logistic_fallback(sas_code)
-        return scorer, display_code, (expected_inputs or fb_inputs)
-
-    def _try_compile(body_code: str, inputs_list: list[str]):
-        def _score_fn(**row):
-            env = {
-                "math": math,
-                "MISSING": MISSING, "MEAN": MEAN, "SUM": SUM, "NMISS": NMISS, "COALESCE": COALESCE,
-                "_linp_": 0.0,
-                "_badval_": 0
-            }
-            for name in inputs_list:
-                env[name] = row.get(name, None)
-            for k, v in row.items():
-                if k not in env: env[k] = v
-            exec(body_code, {}, env)
-            out = {}
-            p = _pick_prob_from_env(env)
-            if p is not None:
-                out["EM_EVENTPROBABILITY"] = p
-            for key in ("EM_CLASSIFICATION","I_BAD","I_TARGET","LABEL"):
-                if key in env and env[key] is not None:
-                    out["EM_CLASSIFICATION"] = env[key]; break
-            return out
-        return _score_fn
-
+    # Si el código menciona missing(BAD) o falla el exec del cuerpo traducido => fallback tolerante
     try:
         exec(body, {}, {"math": math, "_linp_":0.0, "_badval_":0})
-        score_fn = _try_compile(body, merged_inputs)
+        score_fn = None
         display_code = (
             "def " + func_name + "(**row):\n"
             "    # inputs available: " + ", ".join(merged_inputs) + "\n"
@@ -320,10 +294,37 @@ def compile_sas_score(sas_code: str, func_name: str = "sas_score", expected_inpu
             "\n".join(["    " + ln for ln in body.splitlines()]) + "\n" +
             "    # --- end translated body ---\n"
         )
+        score_fn = _build_exec_wrapper(body, merged_inputs)
+        # Si hay BAD en missing(), prefiero fallback para evitar NaN/None
+        if re.search(r"missing\(\s*'?BAD'?\s*\)", pre, flags=re.I):
+            raise RuntimeError("Force fallback due to missing(BAD)")
         return score_fn, display_code, merged_inputs
     except Exception:
         scorer, display_code, fb_inputs = _compile_logistic_fallback(sas_code)
         return scorer, display_code, (expected_inputs or fb_inputs)
+
+def _build_exec_wrapper(body_code: str, inputs_list: list[str]):
+    def _score_fn(**row):
+        env = {
+            "math": math,
+            "MISSING": MISSING, "MEAN": MEAN, "SUM": SUM, "NMISS": NMISS, "COALESCE": COALESCE,
+            "_linp_": 0.0,
+            "_badval_": 0
+        }
+        for name in inputs_list:
+            env[name] = row.get(name, None)
+        for k, v in row.items():
+            if k not in env: env[k] = v
+        exec(body_code, {}, env)
+        out = {}
+        p = _pick_prob_from_env(env)
+        if p is not None:
+            out["EM_EVENTPROBABILITY"] = p
+        for key in ("EM_CLASSIFICATION","I_BAD","I_TARGET","LABEL"):
+            if key in env and env[key] is not None:
+                out["EM_CLASSIFICATION"] = env[key]; break
+        return out
+    return _score_fn
 
 # ===== DataFrame helper =====
 def score_dataframe(score_fn: Callable, df: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
