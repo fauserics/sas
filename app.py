@@ -6,36 +6,23 @@ import pandas as pd
 import streamlit as st
 import requests
 
-# 1) Cargar secretos (Streamlit Cloud: Settings → Secrets)
-for k in ["VIYA_URL","MAS_MODULE_ID","CLIENT_ID","CLIENT_SECRET","VIYA_USER","VIYA_PASSWORD","CA_PEM"]:
-    if k in st.secrets: os.environ[k] = st.secrets[k]
+# --- justo después de los imports al inicio de app.py ---
+import os, requests, streamlit as st
 
-# 2) Si te pasan un PEM en secrets, escribirlo a disco y setear verify
+# Cargar secrets a env
+for k in ["VIYA_URL","MAS_MODULE_ID","BEARER_TOKEN","CA_PEM"]:
+    if k in st.secrets:
+        os.environ[k] = st.secrets[k]
+
+# Si nos pasaron una CA como texto, guardarla y usarla
 if os.getenv("CA_PEM"):
-    with open("/tmp/viya.pem","w") as f: f.write(os.environ["CA_PEM"])
+    with open("/tmp/viya.pem","w") as f:
+        f.write(os.environ["CA_PEM"])
     os.environ["VIYA_CA_BUNDLE"] = "/tmp/viya.pem"
 
-def get_access_token():
-    base = os.environ["VIYA_URL"].rstrip("/")
-    # Prioriza client_credentials; si no hay, usa password
-    cid, csec = os.getenv("CLIENT_ID"), os.getenv("CLIENT_SECRET")
-    if cid and csec:
-        r = requests.post(f"{base}/SASLogon/oauth/token",
-                          auth=(cid, csec),
-                          data={"grant_type":"client_credentials"},
-                          timeout=15, verify=os.getenv("VIYA_CA_BUNDLE") or True)
-    else:
-        r = requests.post(f"{base}/SASLogon/oauth/token",
-                          auth=("sas.ec",""),
-                          data={"grant_type":"password",
-                                "username":os.getenv("VIYA_USER"),
-                                "password":os.getenv("VIYA_PASSWORD")},
-                          timeout=15, verify=os.getenv("VIYA_CA_BUNDLE") or True)
-    r.raise_for_status()
-    return r.json()["access_token"]
-
-# 3) Publicá el token para el cliente MAS ya usado por tu app
-os.environ["BEARER_TOKEN"] = get_access_token()
+# NO auto-llames a SASLogon aquí. Solo usa BEARER_TOKEN si está:
+if not os.getenv("BEARER_TOKEN"):
+    st.warning("No BEARER_TOKEN configurado. Cárgalo en Secrets o exporta la variable de entorno en el host.")
 
 
 # LLM refinement wrapper (ya creaste llm/assistant.py)
