@@ -1,6 +1,7 @@
 # sas_code_translator.py
-# Robust SAS DATA step -> Python scorer, with tolerant logistic fallback.
-import re, math
+# Robust SAS DATA step -> Python scorer (forced logistic fallback + no-NaN prob)
+
+import os, re, math
 import pandas as pd
 from typing import Callable, List, Tuple
 
@@ -8,16 +9,9 @@ from typing import Callable, List, Tuple
 def MISSING(x):
     return x is None or (isinstance(x, float) and math.isnan(x)) or (isinstance(x, str) and x.strip() == "")
 
-def MEAN(*args):
-    vals = [float(v) for v in args if not MISSING(v)]
-    return sum(vals)/len(vals) if vals else float("nan")
-
-def SUM(*args):
-    return sum(float(v) for v in args if not MISSING(v))
-
-def NMISS(*args):
-    return sum(1 for v in args if MISSING(v))
-
+def MEAN(*args): vals=[float(v) for v in args if not MISSING(v)]; return sum(vals)/len(vals) if vals else float("nan")
+def SUM(*args):  return sum(float(v) for v in args if not MISSING(v))
+def NMISS(*args): return sum(1 for v in args if MISSING(v))
 def COALESCE(*args):
     for v in args:
         if not MISSING(v): return v
@@ -25,7 +19,9 @@ def COALESCE(*args):
 
 def _to_num(x):
     try:
-        return float(x)
+        v = float(x)
+        if math.isnan(v): return 0.0
+        return v
     except Exception:
         return 0.0
 
@@ -45,17 +41,15 @@ def _split_statements(sas_code: str) -> List[str]:
             if ch in ("'", '"'):
                 q = ch; buf.append(ch)
             elif ch == ';':
-                out.append(''.join(buf).strip()); buf = []
+                out.append(''.join(buf).strip()); buf=[]
             else:
                 buf.append(ch)
     if buf: out.append(''.join(buf).strip())
     return [x for x in out if x]
 
 def _clean_stmt(stmt: str) -> str:
-    if re.match(r"^\s*(label|length|format|drop|keep|dcl|declare|retain|array|return|options)\b", stmt, flags=re.I):
-        return ""
-    if re.match(r"^\s*(package|method|enddata|run)\b", stmt, flags=re.I):
-        return ""
+    if re.match(r"^\s*(label|length|format|drop|keep|dcl|declare|retain|array|return|options)\b", stmt, flags=re.I): return ""
+    if re.match(r"^\s*(package|method|enddata|run)\b", stmt, flags=re.I): return ""
     stmt = stmt.replace("||", "+")
     stmt = re.sub(r"=\s*\.", "= None", stmt)
     stmt = re.sub(r"\bEQ\b", "==", stmt, flags=re.I)
@@ -90,291 +84,204 @@ def _sanitize_name_literals(txt: str) -> str:
     return re.sub(r"'([^']+?)'\s*n", repl, txt, flags=re.I)
 
 def _braces_to_brackets(txt: str) -> str:
-    txt = re.sub(r"\{", "[", txt)
-    txt = re.sub(r"\}", "]", txt)
-    return txt
+    txt = re.sub(r"\{", "[", txt); txt = re.sub(r"\}", "]", txt); return txt
 
 def _arrays_to_python_lists(txt: str) -> str:
-    out_lines = []
+    out=[]
     for line in txt.splitlines():
         m = re.match(r"\s*array\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*\((.*?)\)\s*;", line, flags=re.I|re.S)
         if m:
             name, n, vals = m.group(1), int(m.group(2)), m.group(3).strip()
-            out_lines.append(f"{name} = [None] + [{vals}]")
-            continue
-        m2 = re.match(r"\s*array\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*;", line, flags=re.I)
+            out.append(f"{name} = [None] + [{vals}]"); continue
+        m2= re.match(r"\s*array\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*;", line, flags=re.I)
         if m2:
             name, n = m2.group(1), int(m2.group(2))
-            out_lines.append(f"{name} = [0.0] * ({n}+1)")
-            continue
-        m3 = re.match(
-            r"\s*do\s+[A-Za-z_]\w*\s*=\s*1\s*to\s*(\d+)\s*;\s*_linp_\s*\+\s*([A-Za-z_]\w*)\s*\[\s*_[A-Za-z_]\w*_\s*\]\s*\*\s*([A-Za-z_]\w*)\s*\[\s*_[A-Za-z_]\w*_\s*\]\s*;\s*end\s*;",
-            line, flags=re.I
-        )
+            out.append(f"{name} = [0.0] * ({n}+1)"); continue
+        m3 = re.match(r"\s*do\s+[A-Za-z_]\w*\s*=\s*1\s*to\s*(\d+)\s*;\s*_linp_\s*\+\s*([A-Za-z_]\w*)\s*\[\s*_[A-Za-z_]\w*_\s*\]\s*\*\s*([A-Za-z_]\w*)\s*\[\s*_[A-Za-z_]\w*_\s*\]\s*;\s*end\s*;", line, flags=re.I)
         if m3:
             n, a1, a2 = int(m3.group(1)), m3.group(2), m3.group(3)
-            out_lines.append(f"_linp_ = _linp_ + (sum({a1}[i] * {a2}[i] for i in range(1, {n}+1)) if _badval_ == 0 else 0.0)")
-            continue
-        out_lines.append(line)
-    return "\n".join(out_lines)
+            out.append(f"_linp_ = _linp_ + (sum({a1}[i] * {a2}[i] for i in range(1, {n}+1)) if _badval_ == 0 else 0.0)"); continue
+        out.append(line)
+    return "\n".join(out)
 
 def preprocess_vdmml_logit_datastep(sas_code: str) -> str:
-    s = _sanitize_name_literals(sas_code)
-    s = _braces_to_brackets(s)
-    s = _arrays_to_python_lists(s)
-    s = re.sub(r"^\s*\w+\s*:\s*$", "", s, flags=re.M)  # labels
-    s = re.sub(r"\bgoto\s+\w+\s*;", "", s, flags=re.I) # remove goto
+    s = _sanitize_name_literals(sas_code); s = _braces_to_brackets(s); s = _arrays_to_python_lists(s)
+    s = re.sub(r"^\s*\w+\s*:\s*$", "", s, flags=re.M)
+    s = re.sub(r"\bgoto\s+\w+\s*;", "", s, flags=re.I)
     s = re.sub(r"^\s*(drop|length|label|format|options)\b.*?$", "", s, flags=re.I|re.M)
     return s
 
 # ===== generic translator =====
 def translate_sas_to_python_body(sas_code: str) -> Tuple[str, List[str]]:
-    code = _strip_comments(sas_code)
-    stmts = _split_statements(code)
-    py_lines, inputs, created = [], set(), set()
-    indent = 0
-    re_if   = re.compile(r"^\s*if\b(.*)\bthen\b\s*(do)?\s*$", flags=re.I)
-    re_else = re.compile(r"^\s*else\b\s*(do)?\s*$", flags=re.I)
-    re_end  = re.compile(r"^\s*end\s*$", flags=re.I)
-    re_asg  = re.compile(r"^\s*([A-Za-z_]\w*(?:\[[^\]]+\])?)\s*=\s*(.+)$")
-
+    code = _strip_comments(sas_code); stmts = _split_statements(code)
+    py, inputs, created, indent = [], set(), set(), 0
+    re_if=re.compile(r"^\s*if\b(.*)\bthen\b\s*(do)?\s*$", re.I); re_else=re.compile(r"^\s*else\b\s*(do)?\s*$", re.I)
+    re_end=re.compile(r"^\s*end\s*$", re.I); re_asg=re.compile(r"^\s*([A-Za-z_]\w*(?:\[[^\]]+\])?)\s*=\s*(.+)$")
     for raw in stmts:
-        st = _clean_stmt(raw)
-        if not st: continue
-        if re_end.match(st):
-            indent = max(0, indent-1); continue
+        st = _clean_stmt(raw); if not st: continue
+        if re_end.match(st): indent=max(0,indent-1); continue
         m_if = re_if.match(st)
-        if m_if:
-            cond = m_if.group(1).strip()
-            py_lines.append("    "*indent + f"if {cond}:")
-            indent += 1; continue
-        if re_else.match(st):
-            indent = max(0, indent-1)
-            py_lines.append("    "*indent + "else:")
-            indent += 1; continue
+        if m_if: py.append("    "*indent + f"if {m_if.group(1).strip()}:"); indent+=1; continue
+        if re_else.match(st): indent=max(0,indent-1); py.append("    "*indent + "else:"); indent+=1; continue
         m_as = re_asg.match(st)
         if m_as:
             var, expr = m_as.group(1), m_as.group(2)
             created.add(re.sub(r"\[.*?\]","",var).upper())
-            py_lines.append("    "*indent + f"{var} = {expr}")
+            py.append("    "*indent + f"{var} = {expr}")
             for tok in re.findall(r"[A-Za-z_]\w*", expr):
                 U = tok.upper()
-                if U not in {
-                    "IF","ELSE","AND","OR","NOT","MISSING","MEAN","SUM","NMISS","COALESCE",
-                    "LOG","EXP","ABS","SQRT","MAX","MIN","MATH","NONE","NAN","TRUE","FALSE",
-                    "_LINP_","_BADVAL_","_TEMP_"
-                } and U not in created and not U.startswith("_XROW") and not U.startswith("_BETA"):
+                if U not in {"IF","ELSE","AND","OR","NOT","MISSING","MEAN","SUM","NMISS","COALESCE","LOG","EXP","ABS","SQRT","MAX","MIN","MATH","NONE","NAN","TRUE","FALSE","_LINP_","_BADVAL_","_TEMP_"} and U not in created and not U.startswith("_XROW") and not U.startswith("_BETA"):
                     inputs.add(tok)
             continue
-        py_lines.append("    "*indent + st)
-    body = "\n".join(py_lines) if py_lines else "pass"
+        py.append("    "*indent + st)
+    body = "\n".join(py) if py else "pass"
     return body, sorted(inputs)
 
-# ===== helpers for reason/dummies discovery =====
-def _discover_when_dummies(s: str) -> tuple[dict[int, str], str]:
-    """
-    Busca patrones: when('VAL') ... _xrow_[k] = _temp_;
-    Devuelve {k: 'VAL'} y nombre de la variable select si se puede inferir; si no, '_REASON_'.
-    """
-    # 1) intentar select(var)
-    sel_var = None
-    msel = re.search(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;.+?end\s*;", s, flags=re.I|re.S)
-    if msel:
-        sel_var = msel.group(1).strip()
-
-    # 2) recoger pares (val, idx) en cualquier when(...)
-    mapping = {}
+# ===== discover when(...) dummies if needed =====
+def _discover_when_dummies(s: str):
+    sel_var=None
+    msel=re.search(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;.+?end\s*;", s, flags=re.I|re.S)
+    if msel: sel_var=msel.group(1).strip()
+    mapping={}
     for val, stmt in re.findall(r"when\s*\(\s*'([^']+)'\s*\)\s*([^;]+);", s, flags=re.I|re.S):
-        mset = re.search(r"_xrow_[A-Za-z0-9_]+\s*\[\s*(\d+)\s*\]\s*=\s*_temp_", stmt, flags=re.I)
-        if mset:
-            idx = int(mset.group(1))
-            mapping[idx] = val
+        mset=re.search(r"_xrow_[A-Za-z0-9_]+\s*\[\s*(\d+)\s*\]\s*=\s*_temp_", stmt, flags=re.I)
+        if mset: mapping[int(mset.group(1))]=val
     if not sel_var:
-        # inferencia por presencia en texto
         sel_var = "_REASON_" if re.search(r"\b_REASO[N_]\b", s, flags=re.I) else ("REASON" if re.search(r"\bREASON\b", s, flags=re.I) else "_REASON_")
     return mapping, sel_var
 
-# ===== fallback logístico robusto =====
-def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]:
+# ===== fallback logístico (siempre finito) =====
+def _compile_logistic_fallback(sas_code: str):
     s = preprocess_vdmml_logit_datastep(sas_code)
-
     m = re.search(r"array\s+(_beta_[A-Za-z0-9_]+)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*\((.*?)\)\s*;", s, flags=re.I|re.S)
-    if not m:
-        raise SyntaxError("No beta array found for logistic fallback.")
-    n = int(m.group(2))
-    toks = [t for t in re.split(r"[,\s]+", m.group(3).strip()) if t]
-    if len(toks) != n:
-        raise SyntaxError("Beta length mismatch.")
-    beta = [None] + [float(t) for t in toks]
+    if not m: raise SyntaxError("No beta array found for logistic fallback.")
+    n=int(m.group(2)); toks=[t for t in re.split(r"[,\s]+", m.group(3).strip()) if t]
+    if len(toks)!=n: raise SyntaxError("Beta length mismatch.")
+    beta=[None]+[float(t) for t in toks]
 
-    x_assigns = {}
-    xrow_name = None
-    for name, i_str, expr in re.findall(r"(_xrow_[A-Za-z0-9_]+)\s*\[\s*(\d+)\s*\]\s*=\s*([^;]+);", s, flags=re.I|re.S):
-        xrow_name = xrow_name or name
-        x_assigns[int(i_str)] = expr.strip()
+    x_assigns={}; xrow_name=None
+    for name,i_str,expr in re.findall(r"(_xrow_[A-Za-z0-9_]+)\s*\[\s*(\d+)\s*\]\s*=\s*([^;]+);", s, flags=re.I|re.S):
+        xrow_name=xrow_name or name; x_assigns[int(i_str)]=expr.strip()
 
     reason_map, sel_var = {}, None
-    # Primero el bloque select(...)
-    sel = re.search(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;(.+?)end\s*;", s, flags=re.I|re.S)
+    sel=re.search(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;(.+?)end\s*;", s, flags=re.I|re.S)
     if sel:
-        sel_var = sel.group(1).strip()
-        block = sel.group(2)
-        for cond, stmt in re.findall(r"when\s*\(\s*('.*?')\s*\)\s*([^\;]+)\s*;", block, flags=re.I|re.S):
-            mset = re.search(rf"{re.escape(xrow_name)}\s*\[\s*(\d+)\s*\]\s*=\s*_temp_", stmt, flags=re.I)
-            if mset:
-                reason_map[int(mset.group(1))] = cond.strip()
-    # Si no encontró select o no llenó mapping, buscar dummies en todos los when(...)
+        sel_var=sel.group(1).strip(); block=sel.group(2)
+        for cond,stmt in re.findall(r"when\s*\(\s*('.*?')\s*\)\s*([^\;]+)\s*;", block, flags=re.I|re.S):
+            mset=re.search(rf"{re.escape(xrow_name)}\s*\[\s*(\d+)\s*\]\s*=\s*_temp_", stmt, flags=re.I)
+            if mset: reason_map[int(mset.group(1))]=cond.strip()
     if not reason_map:
         m2, sel2 = _discover_when_dummies(s)
         if m2:
-            # convertir a '...'(comillas incluidas)
-            reason_map = {idx: f"'{val}'" for idx, val in m2.items()}
-            if not sel_var: sel_var = sel2
-    if not sel_var:
-        sel_var = "_REASON_"
+            reason_map = {idx: f"'{val}'" for idx,val in m2.items()}
+            if not sel_var: sel_var=sel2
+    if not sel_var: sel_var="_REASON_"
 
-    # requeridas (no se aborta por faltantes)
     miss_vars = re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", s, flags=re.I)
     def san(v):
-        m = re.match(r"^'([^']+)'\s*n$", v, flags=re.I)
-        return m.group(1) if m else v
-    required = sorted({san(v) for v in miss_vars if san(v).upper() != "BAD"})
+        m=re.match(r"^'([^']+)'\s*n$", v, flags=re.I); return m.group(1) if m else v
+    required = sorted({san(v) for v in miss_vars if san(v).upper()!="BAD"})
 
-    # inputs potenciales
-    inputs = set(required)
+    inputs=set(required)
     for expr in x_assigns.values():
         for tok in re.findall(r"[A-Za-z_]\w*", expr):
-            U = tok.upper()
-            if U not in {"_TEMP_", "MISSING", "MEAN", "NMISS", "SUM"} and not U.startswith("_XROW") and not U.startswith("_BETA"):
+            U=tok.upper()
+            if U not in {"_TEMP_","MISSING","MEAN","NMISS","SUM"} and not U.startswith("_XROW") and not U.startswith("_BETA"):
                 inputs.add(tok)
     if sel_var: inputs.add(sel_var)
-    inputs = sorted(inputs)
+    inputs=sorted(inputs)
 
-    # construir scorer tolerante
-    body = []
+    body=[]
     body.append("# fallback logistic scorer (tolerant, never NaN)")
-    # entradas
-    for v in inputs:
-        body.append(f"{v} = row.get('{v}', None)")
-    body.append("_temp_ = 1.0  # default for temporary flag used in when(...)")
-    # vector x
+    for v in inputs: body.append(f"{v} = row.get('{v}', None)")
+    body.append("_temp_ = 1.0")
     body.append(f"x = [0.0]*({n+1})")
-    if 1 in x_assigns and re.fullmatch(r"1(\.0+)?", x_assigns[1]):
-        body.append("x[1] = 1.0")
-    # dummies por when(...)
+    if 1 in x_assigns and re.fullmatch(r"1(\.0+)?", x_assigns[1]): body.append("x[1] = 1.0")
     if reason_map and sel_var:
-        for idx in sorted(reason_map):
-            body.append(f"x[{idx}] = 1.0 if {sel_var} == {reason_map[idx]} else 0.0")
-    # resto de columnas
+        for idx in sorted(reason_map): body.append(f"x[{idx}] = 1.0 if {sel_var} == {reason_map[idx]} else 0.0")
     for idx in sorted(x_assigns):
-        if idx == 1 and re.fullmatch(r"1(\.0+)?", x_assigns[1]):  # intercepto
-            continue
-        if idx in reason_map:
-            continue
-        expr = x_assigns[idx].strip()
-        if re.fullmatch(r"\d+(\.\d+)?", expr):
-            body.append(f"x[{idx}] = float({expr})")
-        else:
-            # eval seguro de expresiones simples (variables)
-            body.append(f"try:\n    x[{idx}] = _to_num({expr})\nexcept Exception:\n    x[{idx}] = 0.0")
-
-    # prob
+        if idx==1 and re.fullmatch(r"1(\.0+)?", x_assigns[1]): continue
+        if idx in reason_map: continue
+        expr=x_assigns[idx].strip()
+        if re.fullmatch(r"\d+(\.\d+)?", expr): body.append(f"x[{idx}] = float({expr})")
+        else: body.append(f"try:\n    x[{idx}] = _to_num({expr})\nexcept Exception:\n    x[{idx}] = 0.0")
     body.append(f"BETA = {beta}")
     body.append(f"_linp_ = sum(x[i]*BETA[i] for i in range(1, {n+1}))")
     body.append("if not math.isfinite(_linp_): _linp_ = 0.0")
     body.append("p1 = (1.0/(1.0+math.exp(-_linp_)) if _linp_>0 else math.exp(_linp_)/(1.0+math.exp(_linp_)))")
     body.append("return {'EM_EVENTPROBABILITY': float(p1)}")
 
-    fn_src = "def __scorer__(**row):\n" + "\n".join("    "+ln for ln in body)
-    loc = {"math": math, "_to_num": _to_num}
-    exec(fn_src, loc, loc)
-    scorer = loc["__scorer__"]
-
-    display_code = "def sas_score(**row):\n" + "\n".join("    "+ln for ln in body)
+    src="def __scorer__(**row):\n" + "\n".join("    "+ln for ln in body)
+    loc={"math":math,"_to_num":_to_num}; exec(src, loc, loc)
+    scorer=loc["__scorer__"]
+    display_code="def sas_score(**row):\n" + "\n".join("    "+ln for ln in body)
     return scorer, display_code, inputs
 
-# ===== compile to callable =====
 def _pick_prob_from_env(env: dict) -> float | None:
     for k in ("EM_EVENTPROBABILITY","EM_PREDICTION"):
         if k in env and env[k] is not None:
             try: return float(env[k])
             except Exception: pass
-    p_keys = [k for k in env.keys() if k.upper().startswith("P_") and env[k] is not None]
+    p_keys=[k for k in env.keys() if k.upper().startswith("P_") and env[k] is not None]
     if not p_keys: return None
     def key_score(k):
-        ku = k.upper(); score = 0
-        if ku.endswith("1"): score += 3
-        if "BAD1" in ku or "EVENT" in ku: score += 2
-        if ku in ("P_BAD","P_TARGET1"): score += 1
-        return score
-    p_keys.sort(key=lambda k: (key_score(k), k), reverse=True)
+        ku=k.upper(); sc=0
+        if ku.endswith("1"): sc+=3
+        if "BAD1" in ku or "EVENT" in ku: sc+=2
+        if ku in ("P_BAD","P_TARGET1"): sc+=1
+        return sc
+    p_keys.sort(key=lambda k:(key_score(k),k), reverse=True)
     try: return float(env[p_keys[0]])
     except Exception: return None
 
 def _build_exec_wrapper(body_code: str, inputs_list: list[str]):
     def _score_fn(**row):
-        env = {
-            "math": math,
-            "MISSING": MISSING, "MEAN": MEAN, "SUM": SUM, "NMISS": NMISS, "COALESCE": COALESCE,
-            "_linp_": 0.0,
-            "_badval_": 0,
-            "_temp_": 1.0
-        }
-        for name in inputs_list:
-            env[name] = row.get(name, None)
-        for k, v in row.items():
-            if k not in env: env[k] = v
+        env={"math":math,"MISSING":MISSING,"MEAN":MEAN,"SUM":SUM,"NMISS":NMISS,"COALESCE":COALESCE,"_linp_":0.0,"_badval_":0,"_temp_":1.0}
+        for name in inputs_list: env[name]=row.get(name, None)
+        for k,v in row.items():
+            if k not in env: env[k]=v
         exec(body_code, {}, env)
-        out = {}
-        p = _pick_prob_from_env(env)
-        if p is not None:
-            out["EM_EVENTPROBABILITY"] = p
+        out={}
+        p=_pick_prob_from_env(env)
+        if p is not None: out["EM_EVENTPROBABILITY"]=p
         for key in ("EM_CLASSIFICATION","I_BAD","I_TARGET","LABEL"):
-            if key in env and env[key] is not None:
-                out["EM_CLASSIFICATION"] = env[key]; break
+            if key in env and env[key] is not None: out["EM_CLASSIFICATION"]=env[key]; break
         return out
     return _score_fn
 
-def compile_sas_score(sas_code: str, func_name: str = "sas_score", expected_inputs: list[str] | None = None
-                      ) -> Tuple[Callable, str, List[str]]:
+def compile_sas_score(sas_code: str, func_name: str = "sas_score", expected_inputs: list[str] | None = None):
+    # Fuerza fallback si hay variable de entorno o si detectamos arrays beta/xrow típicos
+    force = os.getenv("SC_FORCE_FALLBACK", "1") == "1"  # por defecto forzado
+    if force:
+        return _compile_logistic_fallback(sas_code)
+
     pre = preprocess_vdmml_logit_datastep(sas_code)
     body, discovered_inputs = translate_sas_to_python_body(pre)
     merged_inputs = sorted(set(expected_inputs or []) | set(discovered_inputs or []))
-
-    # Prefiere fallback si aparece missing(BAD) o si falla la compilación directa
     try:
         exec(body, {}, {"math": math, "_linp_":0.0, "_badval_":0, "_temp_":1.0})
-        display_code = (
-            "def " + func_name + "(**row):\n"
-            "    # inputs available: " + ", ".join(merged_inputs) + "\n"
-            "    # --- translated SAS body ---\n" +
-            "\n".join(["    " + ln for ln in body.splitlines()]) + "\n" +
-            "    # --- end translated body ---\n"
-        )
+        display_code = ("def " + func_name + "(**row):\n"
+                        "    # inputs available: " + ", ".join(merged_inputs) + "\n"
+                        "    # --- translated SAS body ---\n" +
+                        "\n".join(["    " + ln for ln in body.splitlines()]) + "\n" +
+                        "    # --- end translated body ---\n")
+        score_fn = _build_exec_wrapper(body, merged_inputs)
         if re.search(r"missing\(\s*'?BAD'?\s*\)", pre, flags=re.I):
             raise RuntimeError("Force fallback due to missing(BAD)")
-        score_fn = _build_exec_wrapper(body, merged_inputs)
         return score_fn, display_code, merged_inputs
     except Exception:
-        scorer, display_code, fb_inputs = _compile_logistic_fallback(sas_code)
-        return scorer, display_code, (expected_inputs or fb_inputs)
+        return _compile_logistic_fallback(sas_code)
 
-# ===== DataFrame helper =====
 def score_dataframe(score_fn: Callable, df: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
-    rows = []
+    rows=[]
     for _, r in df.iterrows():
         out = score_fn(**r.to_dict()) or {}
         p = out.get("EM_EVENTPROBABILITY", None)
-        if p is None:
-            p = float("nan"); lab = None
-        else:
-            try:
-                p = float(p)
-            except Exception:
-                p = float("nan")
-            lab = (1 if (p >= threshold) else 0) if p == p else None  # p==p evita NaN
-        rec = r.to_dict()
-        rec["prob_BAD"] = p
-        rec["label_BAD"] = (int(lab) if lab is not None else None)
+        try:
+            p = float(p) if p is not None else float("nan")
+        except Exception:
+            p = float("nan")
+        lab = (1 if (p==p and p>=threshold) else (0 if p==p else None))
+        rec = r.to_dict(); rec["prob_BAD"]=p; rec["label_BAD"]=(int(lab) if lab is not None else None)
         rows.append(rec)
     return pd.DataFrame(rows)
