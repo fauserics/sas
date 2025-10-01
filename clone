@@ -1,4 +1,9 @@
-set -e
+cd /home/cloud-user
+ls -ld real-time-scoring*
+# si no existe real-time-scoring actual:
+mv real-time-scoring.bak.20251001-181056 real-time-scoring
+ls -ld real-time-scoring
+
 
 # 0) Ir al HOME y respaldar si ya existe la carpeta
 cd /home/cloud-user
