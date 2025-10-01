@@ -1,3 +1,16 @@
+# 1) Entrá a la carpeta del proyecto
+cd /home/cloud-user/real-time-scoring
+
+# 2) Activá tu venv (o créalo si no existe)
+source ~/.venvs/casapp/bin/activate || (python3 -m venv ~/.venvs/casapp && source ~/.venvs/casapp/bin/activate)
+
+# 3) Dependencias mínimas (MAS)
+pip install --upgrade pip
+pip install "streamlit==1.36.0" "pandas==2.1.4" "requests==2.31.0"
+# (solo si vas a usar el tab CAS): pip install "swat==1.6.1"
+
+
+
 cat > payload.json <<'JSON'
 {
   "inputs": [
