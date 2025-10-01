@@ -1,4 +1,13 @@
 export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
+export MAS_MODULE_ID="gradient_boosting__interactive-m"   
+# Si usan CA privada:
+# export VIYA_CA_BUNDLE="/ruta/corporate-ca.pem"
+export NO_PROXY="disco-a20237-rg.gelenable.sas.com,.gelenable.sas.com"
+
+
+
+#Validacion acceso a MAS
+export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
 export CAS_HOST="$(printf '%s' "$VIYA_URL" | sed -E 's#^https?://##; s#/.*$##')"
 export NO_PROXY="$CAS_HOST,.$(echo "$CAS_HOST" | cut -d. -f2-)"
 
