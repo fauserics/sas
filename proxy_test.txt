@@ -1,3 +1,11 @@
+# VIYA REST
+curl -s -X POST \
+  -u "viya_client:" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=password&username=MI_USUARIO&password=MI_PASSWORD&scope=openid" \
+  "https://TU-VIYA/SASLogon/oauth/token"
+
+
 # Reemplazá <ns> por tu namespace y <PAT> por el token (sin < >)
 kubectl exec -n <ns> -it sas-model-publish-6f8dbdd879-zthcq -- sh -lc '
   echo "== Probar reachability ==";
