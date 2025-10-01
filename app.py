@@ -9,7 +9,7 @@ from io import StringIO
 # LLM refinement wrapper
 from llm.assistant import refine_reply_with_llm
 
-# Forzar modo tolerante en el traductor (cuando exista)
+# Tolerant translator mode
 os.environ["SC_FORCE_FALLBACK"] = "1"
 
 APP_TITLE = "Real Time Scoring App (powered by SAS)"
@@ -31,7 +31,7 @@ st.title(APP_TITLE)
 sct = None
 translator_import_error = None
 try:
-    import sas_code_translator as sct  # if missing, we use inline fallback
+    import sas_code_translator as sct  # if missing, use inline fallback
 except Exception as e:
     translator_import_error = e
 
@@ -352,13 +352,13 @@ def parse_mas_outputs(resp_json, threshold=0.5):
 # =========================
 with st.sidebar:
     st.markdown("### Settings")
-    thr = st.slider("Decision threshold (BAD=1)", 0.0, 1.0, 0.50, 0.01)
-    debug = st.toggle("Debug mode", value=False)
-    # Assistant variety + LLM toggles
-    asst_mode = st.selectbox("Assistant variety", ["deterministic", "random", "random (no repeat)"], index=1)
+    thr = st.slider("Decision threshold (BAD=1)", 0.0, 1.0, 0.50, 0.01, key="thr")
+    debug = st.toggle("Debug mode", value=False, key="debug")
+    # Assistant variety + LLM global toggles (claves únicas)
+    asst_mode = st.selectbox("Assistant variety", ["deterministic", "random", "random (no repeat)"], index=1, key="asst_mode_global")
     st.session_state["asst_mode"] = asst_mode
-    use_llm = st.checkbox("Refine with LLM", value=True)
-    llm_temp = st.slider("LLM temperature", 0.0, 1.0, 0.6, 0.05)
+    use_llm_global = st.checkbox("Refine with LLM (global)", value=True, key="use_llm_global")
+    llm_temp_global = st.slider("LLM temperature (global)", 0.0, 1.0, 0.6, 0.05, key="llm_temp_global")
 
     st.markdown("---")
     st.markdown("**Viya REST env**")
@@ -407,9 +407,9 @@ if translator_import_error:
 st.markdown("## 1) Translate SAS score code to Python")
 col_t1, col_t2 = st.columns([1, 3])
 with col_t1:
-    can_translate = st.button("Translate SAS → Python", type="primary", use_container_width=True, disabled=not bool(sas_path))
+    can_translate = st.button("Translate SAS → Python", type="primary", use_container_width=True, disabled=not bool(sas_path), key="btn_translate")
 with col_t2:
-    src_engine = "INLINE fallback" if inline_translator_active else "sas_code_translator.py"
+    src_engine = "INLINE fallback" if sct is None else "sas_code_translator.py"
     st.caption(f"Translator engine: {src_engine}. Runs the Python scorer in {ENGINE_LABEL}.")
 
 if "score_fn" not in st.session_state: st.session_state.score_fn = None
@@ -499,6 +499,7 @@ with tabs[0]:
                             fields_full.append(alias)
 
                     df_in = pd.DataFrame([row]).reindex(columns=fields_full, fill_value=None)
+
                     cat_fields_ci = {k.lstrip("_").lower() for k in st.session_state.cat_levels_ci.keys()} | set(FORCE_CAT)
                     for col in df_in.columns:
                         if col.lower() not in cat_fields_ci:
@@ -506,7 +507,7 @@ with tabs[0]:
 
                     raw_out = st.session_state.score_fn(**df_in.iloc[0].to_dict()) or {}
                     if "EM_EVENTPROBABILITY" not in raw_out:
-                        scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
+                        scored = score_df_local(st.session_state.score_fn, df_in, threshold=st.session_state["thr"])
                         p_raw = scored["prob_BAD"].iloc[0] if "prob_BAD" in scored else float("nan")
                     else:
                         p_raw = raw_out.get("EM_EVENTPROBABILITY", float("nan"))
@@ -515,7 +516,7 @@ with tabs[0]:
                         p = float(p_raw)
                     except Exception:
                         p = float("nan")
-                    lbl = None if (p != p) else (1 if p >= thr else 0)
+                    lbl = None if (p != p) else (1 if p >= st.session_state["thr"] else 0)
 
                     if p != p:
                         st.warning("Probability is NaN. Check categorical values and numeric fields.")
@@ -559,12 +560,12 @@ with tabs[1]:
                 try:
                     with st.spinner("Calling Viya..."):
                         resp = score_row_via_rest(row_rest)
-                    p, lbl = parse_mas_outputs(resp, threshold=thr)
+                    p, lbl = parse_mas_outputs(resp, threshold=st.session_state["thr"])
                     st.success("Viya scoring done.")
                     c1, c2 = st.columns(2)
                     c1.metric("Probability of BAD (Viya)", f"{p:0.4f}" if not pd.isna(p) else "—")
                     c2.metric("Predicted label (Viya)", "1" if lbl == 1 else ("0" if lbl == 0 else "—"))
-                    if debug:
+                    if st.session_state["debug"]:
                         st.subheader("Debug — Viya raw response")
                         st.json(resp)
                 except Exception as e:
@@ -606,7 +607,7 @@ with tabs[2]:
 
             if do_local_csv:
                 try:
-                    scored = score_df_local(st.session_state.score_fn, df, threshold=thr)
+                    scored = score_df_local(st.session_state.score_fn, df, threshold=st.session_state["thr"])
                     st.success(f"Scored in {ENGINE_LABEL}: {len(scored)} rows.")
                     st.dataframe(scored.head(50))
                     st.download_button(
@@ -627,7 +628,7 @@ with tabs[2]:
                 for i, (_, r) in enumerate(df.iterrows(), start=1):
                     try:
                         resp = score_row_via_rest(r.to_dict())
-                        p, lbl = parse_mas_outputs(resp, threshold=thr)
+                        p, lbl = parse_mas_outputs(resp, threshold=st.session_state["thr"])
                     except Exception:
                         p, lbl = float("nan"), None
                     rec = r.to_dict()
@@ -656,6 +657,11 @@ with tabs[3]:
     st.caption("Enter customer attributes and pick the scoring engine. The assistant will suggest an empathetic reply based on the predicted risk (optionally refined by an LLM).")
 
     eng = st.radio("Engine", [ENGINE_LABEL, "Viya (REST)"], horizontal=True, key="asst_engine")
+
+    # Local controls (visibles en la pestaña) con claves únicas
+    col_llm1, col_llm2 = st.columns([1,1])
+    use_llm = col_llm1.checkbox("Refine with LLM", value=st.session_state.get("use_llm_global", True), key="assistant_use_llm")
+    llm_temp = col_llm2.slider("LLM temperature", 0.0, 1.0, st.session_state.get("llm_temp_global", 0.6), 0.05, key="assistant_llm_temp")
 
     fields = st.session_state.expected_cols or list(sample_df.columns)
     if not fields:
@@ -688,7 +694,7 @@ with tabs[3]:
             out = st.session_state.score_fn(**df_in.iloc[0].to_dict()) or {}
             p = out.get("EM_EVENTPROBABILITY")
             if p is None:
-                scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
+                scored = score_df_local(st.session_state.score_fn, df_in, threshold=st.session_state["thr"])
                 p = scored["prob_BAD"].iloc[0]
             try:
                 p = float(p)
@@ -698,7 +704,7 @@ with tabs[3]:
         else:
             try:
                 resp = score_row_via_rest(row_dict)
-                p, _ = parse_mas_outputs(resp, threshold=thr)
+                p, _ = parse_mas_outputs(resp, threshold=st.session_state["thr"])
                 return float(p), None
             except Exception as e:
                 return None, f"Viya REST error: {e}"
@@ -812,16 +818,16 @@ with tabs[3]:
         if err:
             st.chat_message("assistant").markdown(f"**Issue:** {err}")
         else:
-            tone, reply = _compose_empatic_response(prob, thr, row_asst)
+            tone, reply = _compose_empatic_response(prob, st.session_state["thr"], row_asst)
 
-            # LLM refinement (optional)
+            # LLM refinement (optional; usa toggles locales)
             refined = reply
             dbg = ""
             if use_llm:
                 refined, dbg = refine_reply_with_llm(
                     base_reply=reply,
                     prob=prob,
-                    threshold=thr,
+                    threshold=st.session_state["thr"],
                     row=row_asst,
                     temperature=llm_temp,
                     model=os.getenv("LLM_MODEL", "gpt-4o-mini")
@@ -832,9 +838,9 @@ with tabs[3]:
                 f"**Predicted probability (BAD):** {pretty_p}\n\n"
                 f"**Base template:**\n\n{reply}\n\n"
                 + (f"**LLM refined:**\n\n{refined}\n\n" if use_llm else "")
-                + f"_Tone: {tone}; Threshold: {thr:0.2f}_"
+                + f"_Tone: {tone}; Threshold: {st.session_state['thr']:0.2f}_"
             )
-            if debug and use_llm:
+            if st.session_state["debug"] and use_llm:
                 st.caption(f"LLM debug: {dbg}")
 
 # ---- Info ----
@@ -843,7 +849,7 @@ with tabs[4]:
     sas_file = find_sas_score_file()
     st.write("- SAS score file:", f"`{sas_file}`" if sas_file else "_not found_")
     st.write("- Inputs from inputVar.json:", len(expected_from_json))
-    st.write("- Translator engine:", "INLINE fallback" if inline_translator_active else "sas_code_translator.py")
+    st.write("- Translator engine:", "INLINE fallback" if sct is None else "sas_code_translator.py")
     if st.session_state.expected_cols:
         with st.expander("Expected input fields"):
             st.code("\n".join(st.session_state.expected_cols))
