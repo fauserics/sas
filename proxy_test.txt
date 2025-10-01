@@ -1,4 +1,32 @@
 #VIYA SWAT
+python3 - <<'PY'
+import os, swat, pandas as pd
+c = swat.CAS(os.environ["CAS_HOST"], int(os.getenv("CAS_PORT","8777")),
+             protocol=os.getenv("CAS_PROTOCOL","http"),
+             token=os.getenv("SAS_SERVICES_TOKEN") or os.getenv("BEARER_TOKEN"),
+             username=os.getenv("CAS_USER"), password=os.getenv("CAS_PASSWORD"),
+             ssl_ca_list=os.getenv("CAS_SSL_CA_LIST") or os.getenv("VIYA_CA_BUNDLE"))
+print("Server OK:", c.serverstatus().get('server',{}).get('version'))
+c.loadactionset("astore")
+# fila mínima
+df = pd.DataFrame([{"_REASON_":"DebtCon","REASON":"DebtCon","LOAN":0.0}])
+wlib = os.getenv("CAS_WORK_CASLIB","Public")
+c.upload_frame(df, casout={"name":"_inp_smoke","caslib":wlib,"replace":True})
+c.astore.score(
+    rstore={"name": os.environ["CAS_ASTORE_NAME"], "caslib": os.getenv("CAS_ASTORE_CASLIB","Public")},
+    table={"name":"_inp_smoke","caslib": wlib},
+    casout={"name":"_out_smoke","caslib": wlib,"replace": True},
+    copyvars="ALL"
+)
+out = c.CASTable("_out_smoke", caslib=wlib).to_frame()
+c.terminate()
+print("Cols:", list(out.columns)[:12])
+print("Fila:", out.head(1).to_dict(orient="records")[0])
+PY
+
+
+
+
 python3 -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
 
 curl -sf http://127.0.0.1:8501/healthz && echo "OK"
