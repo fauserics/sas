@@ -1,3 +1,37 @@
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$VIYA_URL/microanalyticScore/modules/$MAS_MODULE_ID" \
+| python3 - <<'PY' > payload.json
+import sys, json, re
+m=json.load(sys.stdin)
+ins = ((m.get("signature") or {}).get("inputs") or [])
+
+def defval(name, typ):
+    n=name.lower()
+    if 'reason' in n: return "DebtCon"
+    if 'job' in n:    return "Other"
+    if (typ or '').lower() in ('double','int','integer','decimal','float','number'):
+        return 0
+    return ""  # texto genérico
+
+payload = {"inputs":[{"name":i["name"], "value": defval(i["name"], i.get("type",""))} for i in ins]}
+# si hay REASON pero no _REASON_, agregalo, y viceversa
+names=[i["name"] for i in payload["inputs"]]
+if "REASON" in names and "_REASON_" not in names:
+    payload["inputs"].append({"name":"_REASON_","value":"DebtCon"})
+if "_REASON_" in names and "REASON" not in names:
+    payload["inputs"].append({"name":"REASON","value":"DebtCon"})
+print(json.dumps(payload))
+PY
+
+# 2) probar el score
+curl -s -m 15 -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d @payload.json \
+  "$VIYA_URL/microanalyticScore/modules/$MAS_MODULE_ID/steps/score" | python3 -m json.tool
+
+
+
+
+
 curl -s -m 10 -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"inputs":[
         {"name":"REASON","value":"DebtCon"},
