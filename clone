@@ -1,3 +1,7 @@
+curl -sSf http://127.0.0.1:8501/healthz && echo "OK" || echo "FALLA"
+
+
+
 xdg-open http://127.0.0.1:8501 2>/dev/null || sensible-browser http://127.0.0.1:8501
 
 
