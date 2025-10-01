@@ -1,3 +1,11 @@
+#VIYA REST
+nslookup $VIYA_URL
+nc -vz disco-a20237-rg.gelenable.sas.com 443
+
+NO_PROXY="disco-a20237-rg.gelenable.sas.com,.sas.com" \
+  curl -vk https://disco-a20237-rg.gelenable.sas.com/SASLogon/login --max-time 10
+
+
 #VIYA SWAT
 python3 - <<'PY'
 import os, swat, pandas as pd
