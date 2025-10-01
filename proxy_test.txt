@@ -1,5 +1,9 @@
 # VIYA REST
 
+nslookup disco-a20237-rg.gelenable.sas.com
+curl -v https://disco-a20237-rg.gelenable.sas.com/SASLogon/login --max-time 10
+
+
 # ¿Llega a abrir TLS al host?
 curl -vkI --connect-timeout 10 https://disco-a20237-rg.gelenable.sas.com
 
