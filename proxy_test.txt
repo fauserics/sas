@@ -1,4 +1,20 @@
-# en la VM
+# en la VM# A) DNS (3s)
+nslookup -timeout=3 "$CAS_HOST" || getent hosts "$CAS_HOST" || echo "DNS FAIL"
+
+PORT="${CAS_PORT:-443}"
+nc -vz -w 3 "$CAS_HOST" "$PORT" || echo "TCP FAIL"
+
+if [ "${CAS_PROTOCOL}" = "https" ] || [ "${CAS_PROTOCOL}" = "http" ]; then
+  curl -sS -m 3 -k \
+    -H "Authorization: Bearer $SAS_SERVICES_TOKEN" \
+    -H "Content-Type: application/json" \
+    -X POST "https://$CAS_HOST/cas/sessions" -d '{}' | head -c 200 || echo "REST FAIL"
+fi
+
+
+
+
+
 # 1) Tomá el host del VIYA_URL
 echo "$VIYA_URL"
 export CAS_HOST="$(printf '%s' "$VIYA_URL" | sed -E 's#^https?://##; s#/.*$##')"
