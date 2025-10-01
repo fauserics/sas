@@ -1,4 +1,6 @@
 # en la VM
+export NO_PROXY="$CAS_HOST,.gelenable.sas.com"
+
 python - <<'PY'
 import os, swat
 c = swat.CAS(os.environ["CAS_HOST"], int(os.getenv("CAS_PORT")),
