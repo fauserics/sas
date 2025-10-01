@@ -1,3 +1,51 @@
+# Cliente MAS: crear SOLO si no existe
+[ -f viya_mas_client.py ] || cat > viya_mas_client.py <<'PY'
+import os, requests
+
+def _session_no_proxy():
+    s = requests.Session()
+    s.trust_env = False  # ignora http_proxy/https_proxy del sistema
+    return s
+
+def score_row_via_rest(row: dict) -> dict:
+    base = (os.getenv("VIYA_URL") or "").rstrip("/")
+    module = os.getenv("MAS_MODULE_ID")
+    token = os.getenv("BEARER_TOKEN") or os.getenv("SAS_SERVICES_TOKEN")
+    if not (base and module and token):
+        raise RuntimeError("Faltan VIYA_URL, MAS_MODULE_ID o BEARER_TOKEN/SAS_SERVICES_TOKEN.")
+    url = f"{base}/microanalyticScore/modules/{module}/steps/score"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {"inputs": [{"name": k, "value": v} for k, v in (row or {}).items()]}
+    verify = os.getenv("VIYA_CA_BUNDLE") or True
+    r = _session_no_proxy().post(url, json=payload, headers=headers,
+                                 timeout=float(os.getenv("VIYA_TIMEOUT","30")), verify=verify)
+    r.raise_for_status()
+    return r.json()
+PY
+
+# Stub LLM: crear SOLO si falta (para que la pestaña Assistant no rompa)
+mkdir -p llm
+[ -f llm/assistant.py ] || cat > llm/assistant.py <<'PY'
+def refine_reply_with_llm(base_reply, prob, threshold, row, temperature=0.6, model="stub"):
+    return base_reply, "stub"
+PY
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 cd /home/cloud-user/real-time-scoring
 mkdir -p llm score
 
