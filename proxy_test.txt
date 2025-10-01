@@ -8,7 +8,12 @@ openai>=1.0,<2
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+pip install streamlit pandas requests
+# si vas a usar el asistente LLM:
+pip install openai
+# si querés cargar .env:
+# pip install python-dotenv
+
 
 export OPENAI_API_KEY =" "
 
