@@ -6,13 +6,16 @@ import pandas as pd
 import streamlit as st
 from io import StringIO
 
+# LLM refinement wrapper
+from llm.assistant import refine_reply_with_llm
+
 # Forzar modo tolerante en el traductor (cuando exista)
 os.environ["SC_FORCE_FALLBACK"] = "1"
 
 APP_TITLE = "Real Time Scoring App (powered by SAS)"
 ENGINE_LABEL = "GitHub (Python)"
 
-# Forzar estas vars como categóricas si el .sas no trae niveles
+# Categorical hints
 FORCE_CAT = {"reason"}
 DEFAULT_LEVELS = {"reason": ["DebtCon", "HomeImp"]}
 
@@ -23,17 +26,17 @@ st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 
 # =========================
-# Intento importar traductor oficial
+# Import translator (optional)
 # =========================
 sct = None
 translator_import_error = None
 try:
-    import sas_code_translator as sct  # <- si falla, activamos fallback inline
+    import sas_code_translator as sct  # if missing, we use inline fallback
 except Exception as e:
     translator_import_error = e
 
 # =========================
-# Fallback inline: traductor/logit minimal si falla el import
+# Inline fallback for DATA step logistic
 # =========================
 def _to_num(x):
     try:
@@ -143,7 +146,7 @@ def _score_dataframe_inline(score_fn, df, threshold=0.5):
         rows.append(rec)
     return pd.DataFrame(rows)
 
-# Si falló el import, preparo funciones shim con fallback inline
+# Use fallback if translator missing
 if sct is None:
     def compile_sas_score(code, func_name="sas_score", expected_inputs=None):
         return _compile_logit_fallback_inline(code, expected_inputs=expected_inputs)
@@ -156,7 +159,7 @@ else:
     inline_translator_active = False
 
 # =========================
-# Client REST (Viya)
+# Viya REST client
 # =========================
 try:
     from viya_mas_client import score_row_via_rest
@@ -165,7 +168,7 @@ except Exception:
         raise RuntimeError("viya_mas_client not available. Set VIYA_URL/MAS_MODULE_ID or add the module.")
 
 # =========================
-# Helpers de la app
+# App helpers
 # =========================
 def find_sas_score_file():
     preferred = ["score_code.sas", "model_score.sas", "model_score_code.sas", "dmcas_scorecode.sas"]
@@ -351,13 +354,11 @@ with st.sidebar:
     st.markdown("### Settings")
     thr = st.slider("Decision threshold (BAD=1)", 0.0, 1.0, 0.50, 0.01)
     debug = st.toggle("Debug mode", value=False)
-    # Modo de variedad del assistant
-    asst_mode = st.selectbox(
-        "Assistant variety",
-        ["deterministic", "random", "random (no repeat)"],
-        index=1
-    )
+    # Assistant variety + LLM toggles
+    asst_mode = st.selectbox("Assistant variety", ["deterministic", "random", "random (no repeat)"], index=1)
     st.session_state["asst_mode"] = asst_mode
+    use_llm = st.checkbox("Refine with LLM", value=True)
+    llm_temp = st.slider("LLM temperature", 0.0, 1.0, 0.6, 0.05)
 
     st.markdown("---")
     st.markdown("**Viya REST env**")
@@ -371,7 +372,7 @@ with st.sidebar:
         st.success("inputVar.json reloaded.")
 
 # =========================
-# Carga de archivos base
+# Load base files
 # =========================
 expected_from_json = load_input_vars()
 sas_path = find_sas_score_file()
@@ -382,7 +383,7 @@ else:
 sample_df = load_sample_df(expected_from_json)
 
 # =========================
-# Debug del SyntaxError del traductor (si existió)
+# Translator diagnostics (optional)
 # =========================
 if translator_import_error:
     st.markdown("### Translator import error (sas_code_translator.py)")
@@ -398,10 +399,10 @@ if translator_import_error:
             snippet = "\n".join(f"{i+1:>4}: {lines[i]}" for i in range(start, end))
             st.code(snippet, language="python")
     except Exception as ex:
-        st.info(f"No pudimos abrir/analizar sas_code_translator.py: {ex}")
+        st.info(f"Could not open/parse sas_code_translator.py: {ex}")
 
 # =========================
-# Traducción SAS → Python (para motor GitHub)
+# SAS → Python translation (GitHub engine)
 # =========================
 st.markdown("## 1) Translate SAS score code to Python")
 col_t1, col_t2 = st.columns([1, 3])
@@ -417,26 +418,13 @@ if "expected_cols" not in st.session_state: st.session_state.expected_cols = exp
 if "cat_levels" not in st.session_state: st.session_state.cat_levels = {}
 if "cat_levels_ci" not in st.session_state: st.session_state.cat_levels_ci = {}
 
-def build_cat_levels_ci(cat_levels):
-    ci = {}
-    for k, v in cat_levels.items():
-        ci[k.lower()] = v
-        base = k.lstrip("_").lower()
-        ci[base] = v
-        ci["_"+base] = v
-    for f in FORCE_CAT:
-        if f not in ci and "_"+f not in ci:
-            if f in DEFAULT_LEVELS:
-                ci[f] = DEFAULT_LEVELS[f]; ci["_"+f] = DEFAULT_LEVELS[f]
-    return ci
-
 if can_translate and sas_path:
     raw_code = load_file_text(sas_path)
     try:
         expected_auto = extract_expected_inputs_from_sas(raw_code)
         st.session_state.cat_levels = parse_categorical_levels_from_sas(raw_code)
         st.session_state.cat_levels_ci = build_cat_levels_ci(st.session_state.cat_levels)
-        combined_inputs = sorted(set((expected_from_json or [])) | set(expected_auto or []))
+        combined_inputs = sorted(set((expected_from_json or []) | set(expected_auto or [])))
         combined_inputs = [c for c in combined_inputs if c.upper() != "BAD"]
         score_fn, py_code, expected = compile_sas_score(
             raw_code, func_name="sas_score",
@@ -463,11 +451,11 @@ with st.expander("Show generated Python score code", expanded=False):
         st.info("Translate first to view the generated code.")
 
 # =========================
-# Tabs (con Assistant)
+# Tabs
 # =========================
 tabs = st.tabs([f"Single case — {ENGINE_LABEL}", "Single case — Viya (REST)", "CSV batch", "Assistant", "Info"])
 
-# ---- Single case — GitHub (Python)
+# ---- Single case — GitHub (Python) ----
 with tabs[0]:
     st.markdown(f"## 2) Provide inputs for {ENGINE_LABEL}")
     fields = st.session_state.expected_cols or list(sample_df.columns)
@@ -511,7 +499,6 @@ with tabs[0]:
                             fields_full.append(alias)
 
                     df_in = pd.DataFrame([row]).reindex(columns=fields_full, fill_value=None)
-
                     cat_fields_ci = {k.lstrip("_").lower() for k in st.session_state.cat_levels_ci.keys()} | set(FORCE_CAT)
                     for col in df_in.columns:
                         if col.lower() not in cat_fields_ci:
@@ -666,7 +653,7 @@ with tabs[2]:
 # ---- Assistant (Conversational, English) ----
 with tabs[3]:
     st.markdown("## Conversational Assistant (English)")
-    st.caption("Enter customer attributes and pick the scoring engine. The assistant will suggest an empathetic response based on the predicted risk.")
+    st.caption("Enter customer attributes and pick the scoring engine. The assistant will suggest an empathetic reply based on the predicted risk (optionally refined by an LLM).")
 
     eng = st.radio("Engine", [ENGINE_LABEL, "Viya (REST)"], horizontal=True, key="asst_engine")
 
@@ -718,10 +705,10 @@ with tabs[3]:
 
     def _compose_empatic_response(prob, threshold, row=None):
         """
-        Varía el mensaje por bandas y elige template:
-          - deterministic: rotación
-          - random: elección al azar
-          - random (no repeat): azar evitando repetir el último índice por banda
+        Templates by probability band with variety modes:
+          - deterministic: rotation
+          - random: random choice
+          - random (no repeat): random avoiding last index per band
         """
         row = row or {}
         reason = (row.get("REASON") or row.get("_REASON_") or "").strip()
@@ -749,61 +736,46 @@ with tabs[3]:
 
         TEMPLATES = {
             "unknown": [
-                ("technical",
-                 "I couldn’t compute a reliable probability right now. Could you confirm a few details "
-                 "(for example, Reason{amt} and Employment years)? I’ll recheck immediately.".replace("{amt}", amount_txt)),
-                ("technical",
-                 "I’m missing a couple of fields to score this case{amt}. If you can confirm them (e.g., Reason and LOAN), "
-                 "I’ll run the evaluation again right away.".replace("{amt}", amount_txt)),
-                ("technical",
-                 "Something seems off with the inputs{amt}. Please confirm the key values (like Reason and income/tenure) and I’ll try again."
-                 .replace("{amt}", amount_txt)),
+                ("technical", "I couldn’t compute a reliable probability right now. Could you confirm a few details "
+                              "(for example, Reason{amt} and Employment years)? I’ll recheck immediately.".replace("{amt}", amount_txt)),
+                ("technical", "I’m missing a couple of fields to score this case{amt}. If you can confirm them (e.g., Reason and LOAN), "
+                              "I’ll run the evaluation again right away.".replace("{amt}", amount_txt)),
+                ("technical", "Something seems off with the inputs{amt}. Please confirm the key values (like Reason and income/tenure) and I’ll try again."
+                              .replace("{amt}", amount_txt)),
             ],
             "very_low": [
-                ("approve_low",
-                 "Thanks for the details! Based on your profile{reason}, you look **well positioned** for approval. "
-                 "I can proceed with the application and outline the next steps (document upload and a quick ID check). "
-                 "Shall I continue?"),
-                ("approve_low",
-                 "Good news — your current profile{reason} indicates **low risk**. "
-                 "I can move forward and share the next steps for a smooth approval. Would you like me to proceed?"),
-                ("approve_low",
-                 "Everything looks solid{reason}. You’re **in great shape** for approval. "
-                 "I can continue with the application flow and timing. Is that okay with you?"),
+                ("approve_low", "Thanks for the details! Based on your profile{reason}, you look **well positioned** for approval. "
+                                "I can proceed with the application and outline the next steps (document upload and a quick ID check). "
+                                "Shall I continue?"),
+                ("approve_low", "Good news — your current profile{reason} indicates **low risk**. "
+                                "I can move forward and share the next steps for a smooth approval. Would you like me to proceed?"),
+                ("approve_low", "Everything looks solid{reason}. You’re **in great shape** for approval. "
+                                "I can continue with the application flow and timing. Is that okay with you?"),
             ],
             "near_low": [
-                ("approve_borderline",
-                 "Thanks for sharing those details. You’re **close to our approval threshold**. "
-                 "We can submit as is, or strengthen the case (smaller amount{amt}, extra documents). Which do you prefer?"),
-                ("approve_borderline",
-                 "You’re near the line for approval. We can go ahead now, or improve the application "
-                 "by adjusting the requested amount{amt} or adding supporting docs. What works best?"),
-                ("approve_borderline",
-                 "You’re almost there. If you’d like, we can optimize the request (e.g., tweak the amount{amt} or add proof of income). "
-                 "Shall we try that?"),
+                ("approve_borderline", "Thanks for sharing those details. You’re **close to our approval threshold**. "
+                                       "We can submit as is, or strengthen the case (smaller amount{amt}, extra documents). Which do you prefer?"),
+                ("approve_borderline", "You’re near the line for approval. We can go ahead now, or improve the application "
+                                       "by adjusting the requested amount{amt} or adding supporting docs. What works best?"),
+                ("approve_borderline", "You’re almost there. If you’d like, we can optimize the request (e.g., tweak the amount{amt} or add proof of income). "
+                                       "Shall we try that?"),
             ],
             "elevated": [
-                ("cautionary",
-                 "I understand this is important. Right now your profile suggests **higher risk**. "
-                 "We can still explore alternatives: a smaller amount{amt}, a longer term, or a guarantor. Would you like to try one together?"),
-                ("cautionary",
-                 "At the moment, your risk score is above our comfort zone. "
-                 "We could reduce the requested amount{amt} or provide additional backing (docs/guarantor). Should we explore these options?"),
-                ("cautionary",
-                 "Your case is currently above our standard risk threshold. "
-                 "We can adjust conditions (e.g., lower amount{amt}) to improve your chances. Interested?"),
+                ("cautionary", "I understand this is important. Right now your profile suggests **higher risk**. "
+                               "We can still explore alternatives: a smaller amount{amt}, a longer term, or a guarantor. Would you like to try one together?"),
+                ("cautionary", "At the moment, your risk score is above our comfort zone. "
+                               "We could reduce the requested amount{amt} or provide additional backing (docs/guarantor). Should we explore these options?"),
+                ("cautionary", "Your case is currently above our standard risk threshold. "
+                               "We can adjust conditions (e.g., lower amount{amt}) to improve your chances. Interested?"),
             ],
             "very_high": [
-                ("decline_empatic",
-                 "Thank you for your time. I know this isn’t the outcome you hoped for. "
-                 "Right now we’re **unable to proceed** based on our criteria. "
-                 "If you’d like, I can share **practical next steps** to strengthen your profile and when to reapply."),
-                ("decline_empatic",
-                 "I appreciate your patience. At this stage, we’re **not able to continue** under current policies. "
-                 "I can provide concrete suggestions to improve your eligibility and a realistic timeline to try again."),
-                ("decline_empatic",
-                 "I understand this is disappointing. We’re **unable to move forward** today. "
-                 "Would guidance on improving your credit profile and reapplication timing be helpful?"),
+                ("decline_empatic", "Thank you for your time. I know this isn’t the outcome you hoped for. "
+                                    "Right now we’re **unable to proceed** based on our criteria. "
+                                    "If you’d like, I can share **practical next steps** to strengthen your profile and when to reapply."),
+                ("decline_empatic", "I appreciate your patience. At this stage, we’re **not able to continue** under current policies. "
+                                    "I can provide concrete suggestions to improve your eligibility and a realistic timeline to try again."),
+                ("decline_empatic", "I understand this is disappointing. We’re **unable to move forward** today. "
+                                    "Would guidance on improving your credit profile and reapplication timing be helpful?"),
             ],
         }
 
@@ -841,12 +813,29 @@ with tabs[3]:
             st.chat_message("assistant").markdown(f"**Issue:** {err}")
         else:
             tone, reply = _compose_empatic_response(prob, thr, row_asst)
+
+            # LLM refinement (optional)
+            refined = reply
+            dbg = ""
+            if use_llm:
+                refined, dbg = refine_reply_with_llm(
+                    base_reply=reply,
+                    prob=prob,
+                    threshold=thr,
+                    row=row_asst,
+                    temperature=llm_temp,
+                    model=os.getenv("LLM_MODEL", "gpt-4o-mini")
+                )
+
             pretty_p = "—" if prob is None or pd.isna(prob) else f"{prob:0.4f}"
             st.chat_message("assistant").markdown(
                 f"**Predicted probability (BAD):** {pretty_p}\n\n"
-                f"**Suggested reply:**\n\n{reply}\n\n"
-                f"_Tone: {tone}; Threshold: {thr:0.2f}_"
+                f"**Base template:**\n\n{reply}\n\n"
+                + (f"**LLM refined:**\n\n{refined}\n\n" if use_llm else "")
+                + f"_Tone: {tone}; Threshold: {thr:0.2f}_"
             )
+            if debug and use_llm:
+                st.caption(f"LLM debug: {dbg}")
 
 # ---- Info ----
 with tabs[4]:
