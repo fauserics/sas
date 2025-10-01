@@ -1,3 +1,10 @@
+
+# Opción A: si tenés Firefox
+env no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost \
+  firefox --new-window 'http://127.0.0.1:8501' &
+
+
+
 curl -sSf http://127.0.0.1:8501/healthz && echo "OK" || echo "FALLA"
 
 
