@@ -5,6 +5,14 @@ import os, re, json, math, random
 import pandas as pd
 import streamlit as st
 
+# === Cargar secrets a variables de entorno ===
+import os
+import streamlit as st
+if hasattr(st, "secrets"):
+    for k, v in st.secrets.items():
+        os.environ[k] = str(v)  # override
+
+
 # LLM refinement wrapper (ya creaste llm/assistant.py)
 from llm.assistant import refine_reply_with_llm
 
