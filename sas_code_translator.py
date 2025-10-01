@@ -158,12 +158,12 @@ def translate_sas_to_python_body(sas_code: str) -> Tuple[str, List[str]]:
             created.add(re.sub(r"\[.*?\]","",var).upper())
             py_lines.append("    "*indent + f"{var} = {expr}")
             for tok in re.findall(r"[A-Za-z_]\w*", expr):
-                base = tok.upper()
-                if base not in {
+                U = tok.upper()
+                if U not in {
                     "IF","ELSE","AND","OR","NOT","MISSING","MEAN","SUM","NMISS","COALESCE",
                     "LOG","EXP","ABS","SQRT","MAX","MIN","MATH","NONE","NAN","TRUE","FALSE",
                     "_LINP_","_BADVAL_"
-                } and base not in created and not base.startswith("_XROW") and not base.startswith("_BETA"):
+                } and U not in created and not U.startswith("_XROW") and not U.startswith("_BETA"):
                     inputs.add(tok)
             continue
         py_lines.append("    "*indent + st)
@@ -185,14 +185,14 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
         raise SyntaxError("Beta length mismatch.")
     beta = [None] + [float(t) for t in toks]
 
-    # 2) xrow assignments  (FIX: 3 grupos -> name, idx, expr)
+    # 2) xrow assignments  (name, idx, expr)
     xrow_name = None
     x_assigns = {}
     for name, i_str, expr in re.findall(r"(_xrow_[A-Za-z0-9_]+)\s*\[\s*(\d+)\s*\]\s*=\s*([^;]+);", s, flags=re.I|re.S):
         xrow_name = xrow_name or name
         x_assigns[int(i_str)] = expr.strip()
 
-    # 3) select/when for a categorical (p.ej., REASON)
+    # 3) select/when for a categorical (e.g., REASON)
     reason_map, sel_var = {}, None
     sel = re.search(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;(.+?)end\s*;", s, flags=re.I|re.S)
     if sel:
@@ -205,7 +205,7 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
 
     # 4) required vars by missing(...)
     miss_vars = re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", s, flags=re.I)
-    def san(v): 
+    def san(v):
         m = re.match(r"^'([^']+)'\s*n$", v, flags=re.I)
         return m.group(1) if m else v
     required = sorted({san(v) for v in miss_vars})
@@ -225,10 +225,10 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
     body.append("# fallback logistic scorer (flat)")
     for v in inputs:
         body.append(f"{v} = row.get('{v}', None)")
-    body.append("_badval_ = 0")
+    # quick missing gate (if required were found)
     if required:
-        req_list = ", ".join([f"{v}" for v in required])
-        body.append(f"if any(([{req_list}][i] is None or (isinstance([{req_list}][i], float) and math.isnan([{req_list}][i])) or (isinstance([{req_list}][i], str) and [{req_list}][i]=='')) for i in range(len([{req_list}]))) :")
+        checks = " or ".join([f"{v} is None" for v in required])
+        body.append(f"if {checks}:")
         body.append("    return {'EM_EVENTPROBABILITY': None}")
 
     body.append(f"x = [0.0]*({n+1})")
@@ -244,12 +244,11 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
 
     # Asignaciones directas
     for idx in sorted(x_assigns):
-        if idx == 1 and re.fullmatch(r"1(\.0+)?", x_assigns[1]): 
+        if idx == 1 and re.fullmatch(r"1(\.0+)?", x_assigns[1]):
             continue
         if idx in reason_map:
             continue
-        expr = x_assigns[idx]
-        expr = expr.strip()
+        expr = x_assigns[idx].strip()
         if re.fullmatch(r"\d+(\.\d+)?", expr):
             body.append(f"x[{idx}] = float({expr})")
         else:
@@ -272,7 +271,7 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
 def _pick_prob_from_env(env: dict) -> float | None:
     for k in ("EM_EVENTPROBABILITY","EM_PREDICTION"):
         if k in env and env[k] is not None:
-            try: return float(env[k])
+            try: return float(k and env[k])
             except Exception: pass
     p_keys = [k for k in env.keys() if k.upper().startswith("P_") and env[k] is not None]
     if not p_keys: return None
@@ -337,7 +336,6 @@ def score_dataframe(score_fn: Callable, df: pd.DataFrame, threshold: float = 0.5
     for _, r in df.iterrows():
         out = score_fn(**r.to_dict()) or {}
         p = out.get("EM_EVENTPROBABILITY", None)
-        # Si no hay prob (p.ej., faltantes), devolvemos NaN y etiqueta según threshold (ignorada si NaN)
         if p is None or (isinstance(p, float) and (math.isnan(p))):
             p = float("nan"); lab = None
         else:
