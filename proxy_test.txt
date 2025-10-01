@@ -5,6 +5,10 @@
 %put NOTE: SAS_ACCESS_TOKEN=%sysget(SAS_ACCESS_TOKEN);
 
 #CLI
+curl -s -H "Authorization: Bearer EY_TU_TOKEN" \
+  "https://tu-viya/microanalyticScore/modules?limit=1"
+
+
 curl -s -X POST \
   -u "viya_client:" \
   -H "Content-Type: application/x-www-form-urlencoded" \
