@@ -118,7 +118,10 @@ def _compile_logit_fallback_inline(sas_code, expected_inputs=None):
         if re.fullmatch(r"\d+(\.\d+)?", expr):
             body.append(f"x[{idx}] = float({expr})")
         else:
-            body.append(f"try:\n    x[{idx}] = _to_num({expr})\nexcept Exception:\n    x[{idx}] = 0.0")
+            body.append("try:")
+            body.append(f"    x[{idx}] = _to_num({expr})")
+            body.append("except Exception:")
+            body.append(f"    x[{idx}] = 0.0")
 
     body.append(f"BETA = {beta}")
     body.append(f"_linp_ = sum(x[i]*BETA[i] for i in range(1, {n+1}))")
@@ -163,7 +166,7 @@ else:
     inline_translator_active = False
 
 # =========================
-# Client REST (opcional)
+# Client REST (Viya)
 # =========================
 try:
     from viya_mas_client import score_row_via_rest
@@ -198,8 +201,10 @@ def load_input_vars():
         return []
     try:
         data = json.load(open(p, "r", encoding="utf-8"))
-        if isinstance(data, list) and data and isinstance(data[0], dict) and "name" in data[0]:
-            return [d["name"] for d in data]
+        if isinstance(data, list):
+            if data and isinstance(data[0], dict) and "name" in data[0]:
+                return [d["name"] for d in data]
+            return [str(x) for x in data]
         if isinstance(data, dict):
             if "variables" in data and isinstance(data["variables"], list):
                 return [d.get("name") for d in data["variables"] if "name" in d]
@@ -292,6 +297,10 @@ def build_single_record_form(fields, sample, cat_levels_ci, key_prefix):
             row[c] = tgt.number_input(c, value=default, key=key)
     return row
 
+def is_ds2_astore(code):
+    sigs = ("package score", "dcl package score", "scoreRecord()", "method run()", "enddata;")
+    return any(s in code for s in sigs)
+
 def list_missing(fields, row):
     missing_now = []
     for c in fields:
@@ -358,8 +367,10 @@ with st.sidebar:
     st.caption(f"MAS_MODULE_ID: {os.getenv('MAS_MODULE_ID') or '(not set)'}")
     has_token = bool(os.getenv("BEARER_TOKEN") or os.getenv("SAS_SERVICES_TOKEN") or os.getenv("VIYA_USER"))
     st.caption(f"Auth: {'configured' if has_token else 'missing'}")
-    if translator_import_error:
-        st.error("sas_code_translator.py failed to import. See debugger below.")
+    if st.button("Reload inputVar.json", key="reload_json_btn"):
+        load_input_vars.clear()
+        st.session_state.expected_cols = load_input_vars()
+        st.success("inputVar.json reloaded.")
 
 # =========================
 # Carga de archivos base
@@ -367,7 +378,7 @@ with st.sidebar:
 expected_from_json = load_input_vars()
 sas_path = find_sas_score_file()
 if not sas_path:
-    st.warning("No SAS score file found under ./score. Place your exported DATA step (*.sas) there.")
+    st.caption("No SAS score file found under ./score. Place your exported DATA step (*.sas) there.")
 else:
     st.caption(f"Using SAS score file: `{sas_path}`")
 sample_df = load_sample_df(expected_from_json)
@@ -392,7 +403,7 @@ if translator_import_error:
         st.info(f"No pudimos abrir/analizar sas_code_translator.py: {ex}")
 
 # =========================
-# Traducción
+# Traducción SAS → Python (para motor GitHub)
 # =========================
 st.markdown("## 1) Translate SAS score code to Python")
 col_t1, col_t2 = st.columns([1, 3])
@@ -454,9 +465,9 @@ with st.expander("Show generated Python score code", expanded=False):
         st.info("Translate first to view the generated code.")
 
 # =========================
-# Tabs
+# Tabs (agregamos Assistant conservando todo lo previo)
 # =========================
-tabs = st.tabs([f"Single case — {ENGINE_LABEL}", "Single case — Viya (REST)", "CSV batch", "Info"])
+tabs = st.tabs([f"Single case — {ENGINE_LABEL}", "Single case — Viya (REST)", "CSV batch", "Assistant", "Info"])
 
 # ---- Single case — GitHub (Python)
 with tabs[0]:
@@ -472,7 +483,6 @@ with tabs[0]:
 
     if do_local:
         copy_aliases_inplace_ci(row, st.session_state.cat_levels_ci)
-        # validar categóricas
         invalid = []
         for key_ci, levels in st.session_state.cat_levels_ci.items():
             base = key_ci.lstrip("_")
@@ -490,22 +500,25 @@ with tabs[0]:
                 st.error("Complete the required inputs before scoring: " + ", ".join(missing_now))
             else:
                 try:
-                    # ampliar con alias
                     fields_full = list(fields)
-                    names = set(st.session_state.cat_levels_ci.keys()) | {f"_{f}" for f in FORCE_CAT} | set(FORCE_CAT)
+                    cat_keys   = set(st.session_state.cat_levels_ci.keys())
+                    force_keys = set(FORCE_CAT)
+                    names = cat_keys | set(f"_{f}" for f in force_keys) | force_keys
                     for nm in names:
                         base = nm.lstrip("_")
                         alias = f"_{base}"
-                        if base not in fields_full: fields_full.append(base)
-                        if alias not in fields_full: fields_full.append(alias)
+                        if base not in fields_full:
+                            fields_full.append(base)
+                        if alias not in fields_full:
+                            fields_full.append(alias)
+
                     df_in = pd.DataFrame([row]).reindex(columns=fields_full, fill_value=None)
-                    # cast numérico no-categórico
+
                     cat_fields_ci = {k.lstrip("_").lower() for k in st.session_state.cat_levels_ci.keys()} | set(FORCE_CAT)
                     for col in df_in.columns:
                         if col.lower() not in cat_fields_ci:
                             df_in[col] = pd.to_numeric(df_in[col], errors="coerce").fillna(0.0)
 
-                    # score
                     raw_out = st.session_state.score_fn(**df_in.iloc[0].to_dict()) or {}
                     if "EM_EVENTPROBABILITY" not in raw_out:
                         scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
@@ -529,7 +542,7 @@ with tabs[0]:
                 except Exception as e:
                     st.error(f"{ENGINE_LABEL} scoring failed: {e}")
 
-# ---- Single case — Viya (REST)
+# ---- Single case — Viya (REST) ----
 with tabs[1]:
     st.markdown("## 2) Provide inputs for Viya (REST)")
     fields = st.session_state.expected_cols or list(sample_df.columns)
@@ -566,10 +579,13 @@ with tabs[1]:
                     c1, c2 = st.columns(2)
                     c1.metric("Probability of BAD (Viya)", f"{p:0.4f}" if not pd.isna(p) else "—")
                     c2.metric("Predicted label (Viya)", "1" if lbl == 1 else ("0" if lbl == 0 else "—"))
+                    if debug:
+                        st.subheader("Debug — Viya raw response")
+                        st.json(resp)
                 except Exception as e:
                     st.error(f"Viya REST error: {e}")
 
-# ---- CSV batch
+# ---- CSV batch ----
 with tabs[2]:
     st.markdown("## Batch scoring")
     up = st.file_uploader("Upload a CSV with the input schema", type=["csv"], key="uploader_csv")
@@ -581,11 +597,18 @@ with tabs[2]:
                 if c not in df.columns:
                     df[c] = None
             df = df[fields]
-            names = set(st.session_state.cat_levels_ci.keys()) | {f"_{f}" for f in FORCE_CAT} | set(FORCE_CAT)
+
+            cat_keys   = set(st.session_state.cat_levels_ci.keys())
+            force_keys = set(FORCE_CAT)
+            names = cat_keys | set(f"_{f}" for f in force_keys) | force_keys
             for nm in names:
-                base = nm.lstrip("_"); alias = f"_{base}"
-                if nm in df.columns and base not in df.columns: df[base] = df[nm]
-                if base in df.columns and alias not in df.columns: df[alias] = df[base]
+                base = nm.lstrip("_")
+                alias = f"_{base}"
+                if nm in df.columns and base not in df.columns:
+                    df[base] = df[nm]
+                if base in df.columns and alias not in df.columns:
+                    df[alias] = df[base]
+
             cat_fields_ci = {k.lstrip("_").lower() for k in st.session_state.cat_levels_ci.keys()} | set(FORCE_CAT)
             for col in df.columns:
                 if col.lower() not in cat_fields_ci:
@@ -614,7 +637,8 @@ with tabs[2]:
 
             if do_rest_csv:
                 rows = []
-                prog = st.progress(0); n = len(df)
+                prog = st.progress(0)
+                n = len(df)
                 for i, (_, r) in enumerate(df.iterrows(), start=1):
                     try:
                         resp = score_row_via_rest(r.to_dict())
@@ -641,13 +665,127 @@ with tabs[2]:
         except Exception as e:
             st.error(f"CSV error: {e}")
 
-# ---- Info
+# ---- Assistant (Conversational, English) ----
 with tabs[3]:
+    st.markdown("## Conversational Assistant (English)")
+    st.caption("Enter customer attributes and pick the scoring engine. The assistant will suggest an empathetic response based on the predicted risk.")
+
+    # Engine selector
+    eng = st.radio("Engine", [ENGINE_LABEL, "Viya (REST)"], horizontal=True, key="asst_engine")
+
+    # Form for inputs (reuses detected schema)
+    fields = st.session_state.expected_cols or list(sample_df.columns)
+    if not fields:
+        st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
+    row_asst = build_single_record_form(fields, sample_df, st.session_state.cat_levels_ci, key_prefix="assistant_single")
+
+    def _score_one(row_dict):
+        # common validation
+        copy_aliases_inplace_ci(row_dict, st.session_state.cat_levels_ci)
+        missing_now = list_missing(fields, row_dict)
+        if missing_now:
+            return None, f"Missing required inputs: {', '.join(missing_now)}"
+
+        # Build DataFrame row with alias columns too (for local scorer)
+        fields_full = list(fields)
+        names = set(st.session_state.cat_levels_ci.keys()) | {f'_{f}' for f in FORCE_CAT} | set(FORCE_CAT)
+        for nm in names:
+            base = nm.lstrip("_")
+            alias = f"_{base}"
+            if base not in fields_full: fields_full.append(base)
+            if alias not in fields_full: fields_full.append(alias)
+
+        df_in = pd.DataFrame([row_dict]).reindex(columns=fields_full, fill_value=None)
+        cat_fields_ci = {k.lstrip("_").lower() for k in st.session_state.cat_levels_ci.keys()} | set(FORCE_CAT)
+        for col in df_in.columns:
+            if col.lower() not in cat_fields_ci:
+                df_in[col] = pd.to_numeric(df_in[col], errors="coerce").fillna(0.0)
+
+        # score
+        if eng == ENGINE_LABEL:
+            if st.session_state.score_fn is None:
+                return None, "Translate SAS → Python first in step 1."
+            out = st.session_state.score_fn(**df_in.iloc[0].to_dict()) or {}
+            p = out.get("EM_EVENTPROBABILITY")
+            if p is None:
+                scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
+                p = scored["prob_BAD"].iloc[0]
+            try:
+                p = float(p)
+            except Exception:
+                p = float("nan")
+            return p, None
+        else:
+            try:
+                resp = score_row_via_rest(row_dict)
+                p, _ = parse_mas_outputs(resp, threshold=thr)
+                return float(p), None
+            except Exception as e:
+                return None, f"Viya REST error: {e}"
+
+    def _compose_empatic_response(prob, threshold):
+        # Heurística simple para 3-4 bandas
+        if prob is None or not (isinstance(prob, (int, float))) or pd.isna(prob):
+            tone = "technical"
+            msg = (
+                "We couldn't compute a reliable probability at this time. "
+                "Could you please confirm a few details (e.g., Reason, Loan amount, and Employment years)? "
+                "I'll recheck immediately."
+            )
+            return tone, msg
+
+        if prob < threshold * 0.6:
+            tone = "approve_low"
+            msg = (
+                "Thanks for your patience! Based on your profile, you’re **well positioned** for approval. "
+                "I can proceed with the application and outline the next steps, including document upload and a quick identity check. "
+                "Would you like me to continue?"
+            )
+        elif prob < threshold:
+            tone = "approve_borderline"
+            msg = (
+                "Thanks for sharing those details. You’re **close to our approval threshold**. "
+                "I can submit your application as is, or, if you’d prefer, we can strengthen it by adjusting the amount or providing "
+                "additional supporting documents (for example, proof of income or references). Which option works best for you?"
+            )
+        elif prob < min(0.85, threshold + 0.2):
+            tone = "cautionary"
+            msg = (
+                "I understand this is important. At the moment, your profile suggests **a higher risk level**. "
+                "We can still explore alternatives: a smaller amount, a longer term, or additional guarantor information. "
+                "Would you like to try one of these options together?"
+            )
+        else:
+            tone = "decline_empatic"
+            msg = (
+                "Thank you for your time. I know this isn’t the outcome you hoped for. "
+                "Right now we’re **unable to proceed** based on our criteria. "
+                "If you’d like, I can share **practical next steps**—for example, steps to improve your credit profile and when to reapply. "
+                "Would that be helpful?"
+            )
+        return tone, msg
+
+    st.markdown("### Run assistant")
+    if st.button("Get suggested reply", type="primary", use_container_width=True, key="assistant_btn"):
+        prob, err = _score_one(dict(row_asst))
+        st.chat_message("assistant").markdown("I'll review your inputs and craft a helpful, empathetic reply.")
+        if err:
+            st.chat_message("assistant").markdown(f"**Issue:** {err}")
+        else:
+            tone, reply = _compose_empatic_response(prob, thr)
+            pretty_p = "—" if prob is None or pd.isna(prob) else f"{prob:0.4f}"
+            st.chat_message("assistant").markdown(
+                f"**Predicted probability (BAD):** {pretty_p}\n\n"
+                f"**Suggested reply:**\n\n{reply}\n\n"
+                f"_Tone: {tone}; Threshold: {thr:0.2f}_"
+            )
+
+# ---- Info ----
+with tabs[4]:
     st.markdown("## Info")
     sas_file = find_sas_score_file()
     st.write("- SAS score file:", f"`{sas_file}`" if sas_file else "_not found_")
     st.write("- Inputs from inputVar.json:", len(expected_from_json))
-    # Mostrar si estamos en fallback
     st.write("- Translator engine:", "INLINE fallback" if inline_translator_active else "sas_code_translator.py")
     if st.session_state.expected_cols:
         with st.expander("Expected input fields"):
