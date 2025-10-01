@@ -1,3 +1,34 @@
+cat > payload.json <<'JSON'
+{
+  "inputs": [
+    {"name":"REASON",   "value":"DebtCon"},
+    {"name":"_REASON_", "value":"DebtCon"},
+    {"name":"JOB",      "value":"Other"},
+    {"name":"_JOB_",    "value":"Other"},
+
+    {"name":"LOAN",     "value":11000},
+    {"name":"MORTDUE",  "value":65000},
+    {"name":"VALUE",    "value":90000},
+    {"name":"YOJ",      "value":5},
+    {"name":"DEROG",    "value":0},
+    {"name":"DELINQ",   "value":0},
+    {"name":"CLAGE",    "value":180},
+    {"name":"NINQ",     "value":1},
+    {"name":"CLNO",     "value":20},
+    {"name":"DEBTINC",  "value":33.5}
+  ]
+}
+JSON
+
+curl -s -m 15 -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d @payload.json \
+  "$VIYA_URL/microanalyticScore/modules/$MAS_MODULE_ID/steps/score" | python3 -m json.tool
+
+
+
+
+
+
 curl -s -H "Authorization: Bearer $TOKEN" \
   "$VIYA_URL/microanalyticScore/modules/$MAS_MODULE_ID" \
 | python3 - <<'PY' > payload.json
