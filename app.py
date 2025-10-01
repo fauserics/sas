@@ -8,10 +8,14 @@ import pandas as pd
 import streamlit as st
 
 from sas_code_translator import compile_sas_score, score_dataframe as score_df_local
-from viya_mas_client import score_row_via_rest  # necesita VIYA_URL, MAS_MODULE_ID, token/creds
+from viya_mas_client import score_row_via_rest  # requiere VIYA_URL, MAS_MODULE_ID y auth
 
 APP_TITLE = "Real Time Scoring App (powered by SAS)"
 ENGINE_LABEL = "GitHub (Python)"
+
+# Forzamos estas variables como categóricas si no se detectan en el .sas
+FORCE_CAT = {"reason"}                  # case-insensitive
+DEFAULT_LEVELS = {"reason": ["DebtCon", "HomeImp"]}
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
@@ -65,7 +69,6 @@ def _sanitize_var(v: str) -> str:
 
 def extract_expected_inputs_from_sas(code: str) -> list[str]:
     miss_names = set(_sanitize_var(x) for x in re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", code, flags=re.I))
-    # si aparece REASON (o alias) en el código, incluirlo como potencial input
     if re.search(r"\bREASON\b", code, flags=re.I) or re.search(r"\b_REASO[N_]\b", code, flags=re.I):
         miss_names.add("REASON")
     drop_prefixes = ("_", "EM_", "P_", "I_", "va__d__E_")
@@ -73,20 +76,36 @@ def extract_expected_inputs_from_sas(code: str) -> list[str]:
     return sorted(keep, key=str.upper)
 
 def parse_categorical_levels_from_sas(code: str) -> dict[str, list[str]]:
-    """select(VAR); when('A') ...; -> {'VAR': ['A',...]} (también soporta alias _VAR_)"""
+    """Obtiene niveles de select(VAR); when('...'), guardando VAR y su alias sin '_'."""
     cat = {}
     for m in re.finditer(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;(.+?)end\s*;", code, flags=re.I|re.S):
         var = m.group(1).strip()
         block = m.group(2)
         levels = re.findall(r"when\s*\(\s*'([^']+)'\s*\)", block, flags=re.I)
         if levels:
-            # mantener tanto el nombre tal cual como su base sin "_"
             lv = sorted(list(dict.fromkeys(levels)))
             cat[var] = lv
             base = var.lstrip("_")
             if base != var:
                 cat[base] = lv
     return cat
+
+def build_cat_levels_ci(cat_levels: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Mapa case-insensitive: 'reason' -> niveles; incluye alias con/sin '_'."""
+    ci = {}
+    for k, v in cat_levels.items():
+        ci[k.lower()] = v
+        base = k.lstrip("_").lower()
+        ci[base] = v
+        ci["_"+base] = v
+    # forzar categóricas aunque no estén en el SAS
+    for f in FORCE_CAT:
+        if f not in ci and "_"+f not in ci:
+            # usar defaults si hay, sino queda sin niveles (se pedirá texto libre)
+            if f in DEFAULT_LEVELS:
+                ci[f] = DEFAULT_LEVELS[f]
+                ci["_"+f] = DEFAULT_LEVELS[f]
+    return ci
 
 @st.cache_data
 def load_sample_df(expected_cols: list[str]) -> pd.DataFrame:
@@ -124,17 +143,33 @@ def parse_mas_outputs(resp_json: dict, threshold: float = 0.5) -> tuple[float, i
         lbl = (1 if (p is not None and p >= threshold) else 0)
     return (p if p is not None else float("nan")), lbl
 
-def build_single_record_form(fields: list[str], sample: pd.DataFrame, cat_levels: dict[str, list[str]], key_prefix: str) -> dict:
-    """Selectbox para categóricas (soporta alias) y number_input para numéricas."""
+def build_single_record_form(fields: list[str], sample: pd.DataFrame, cat_levels_ci: dict[str, list[str]], key_prefix: str) -> dict:
+    """Selectbox para categóricas (case-insensitive + alias) y number_input para numéricas.
+       Si se fuerza categórica sin niveles, usa text_input."""
     row = {}
     left, right = st.columns(2)
     for i, c in enumerate(fields):
         tgt = left if i % 2 == 0 else right
         key = f"{key_prefix}__{c}"
-        levels = cat_levels.get(c) or cat_levels.get("_"+c)  # alias
+        cname = c.lower()
+        levels = cat_levels_ci.get(cname) or cat_levels_ci.get("_"+cname)
+        # ¿es categórica forzada sin niveles?
+        forced = cname in FORCE_CAT or ("_"+cname) in FORCE_CAT
         if levels:
             row[c] = tgt.selectbox(c, levels, index=0, key=key)
+        elif forced:
+            # si hay muestra con valores, sugerir algunos
+            sugg = []
+            if c in sample.columns and sample[c].dtype == object:
+                sugg = sorted(list(pd.Series(sample[c]).dropna().unique()))[:20]
+            if not sugg:
+                sugg = DEFAULT_LEVELS.get(cname, [])
+            if sugg:
+                row[c] = tgt.selectbox(c, sugg, index=0, key=key)
+            else:
+                row[c] = tgt.text_input(c, value="", key=key)
         else:
+            # numérico
             default = 0.0
             if c in sample.columns and pd.api.types.is_numeric_dtype(sample[c]):
                 s = sample[c]
@@ -154,14 +189,35 @@ def list_missing(fields: list[str], row: dict) -> list[str]:
             missing_now.append(c)
     return missing_now
 
-def copy_aliases_inplace(row: dict, cat_levels: dict[str, list[str]]):
-    """Copia REASON<-> _REASON_ (y otros alias similares) si falta uno de los dos."""
-    for catvar in cat_levels.keys():
-        base = catvar.lstrip("_")
-        if (catvar not in row) and (base in row):
-            row[catvar] = row[base]
-        if (base not in row) and (catvar in row):
-            row[base] = row[catvar]
+def copy_aliases_inplace_ci(row: dict, cat_levels_ci: dict[str, list[str]]):
+    """Copia REASON <-> _REASON_ de forma case-insensitive si falta uno de los dos."""
+    # construimos el set de nombres (con y sin '_') para todas las categóricas conocidas o forzadas
+    names = set()
+    for k in list(cat_levels_ci.keys()):
+        base = k.lstrip("_")
+        names.add(base.lower()); names.add("_"+base.lower())
+    for f in FORCE_CAT:
+        names.add(f); names.add("_"+f)
+    # helpers CI
+    def get_ci(d, key):
+        for kk in d.keys():
+            if kk.lower() == key.lower(): return d[kk], kk
+        return None, None
+    def set_if_missing_ci(d, key, val):
+        v, realk = get_ci(d, key)
+        if v is None and val is not None and val != "":
+            d[key] = val
+    # copiar
+    for nm in names:
+        if not nm.startswith("_"):
+            base = nm
+            alias = "_"+nm
+            v_base, _ = get_ci(row, base)
+            v_alias, _ = get_ci(row, alias)
+            if v_base is not None and (v_alias is None or v_alias == ""):
+                row[alias] = v_base
+            elif v_alias is not None and (v_base is None or v_base == ""):
+                row[base] = v_alias
 
 # ---------- sidebar ----------
 with st.sidebar:
@@ -197,6 +253,8 @@ if "expected_cols" not in st.session_state:
     st.session_state.expected_cols = expected_from_json
 if "cat_levels" not in st.session_state:
     st.session_state.cat_levels = {}
+if "cat_levels_ci" not in st.session_state:
+    st.session_state.cat_levels_ci = {}
 
 # ---------- translation ----------
 st.markdown("## 1) Translate SAS score code to Python")
@@ -217,6 +275,7 @@ if can_translate and sas_path:
         try:
             expected_auto_for_info = extract_expected_inputs_from_sas(raw_code)
             st.session_state.cat_levels = parse_categorical_levels_from_sas(raw_code)
+            st.session_state.cat_levels_ci = build_cat_levels_ci(st.session_state.cat_levels)
             # Unión: JSON ∪ requeridos del SAS, excluyendo BAD
             combined_inputs = sorted(set((expected_from_json or [])) | set(expected_auto_for_info or []))
             combined_inputs = [c for c in combined_inputs if c.upper() != "BAD"]
@@ -253,22 +312,26 @@ with tabs[0]:
     fields = st.session_state.expected_cols or list(sample_df.columns)
     if not fields:
         st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
-    row = build_single_record_form(fields, sample_df, st.session_state.cat_levels, key_prefix="gh_single")
+    row = build_single_record_form(fields, sample_df, st.session_state.cat_levels_ci, key_prefix="gh_single")
 
     st.markdown(f"## 3) Score in {ENGINE_LABEL}")
     do_local = st.button(f"Score in {ENGINE_LABEL}", type="primary", use_container_width=True, key="btn_gh_single",
                          disabled=(st.session_state.score_fn is None))
 
     if do_local:
-        # ---- aliasing categóricas
-        copy_aliases_inplace(row, st.session_state.cat_levels)
-        # ---- validación de niveles categóricos
+        # aliases categóricas (CI)
+        copy_aliases_inplace_ci(row, st.session_state.cat_levels_ci)
+        # validar categóricas contra niveles si existen
         invalid = []
-        for catvar, levels in st.session_state.cat_levels.items():
-            base = catvar.lstrip("_")
-            val = row.get(catvar, row.get(base, None))
-            if val is not None and str(val) not in levels:
-                invalid.append(f"{base}='{val}' (allowed: {', '.join(levels)})")
+        for key_ci, levels in st.session_state.cat_levels_ci.items():
+            base = key_ci.lstrip("_")
+            # leer valor (CI) desde row
+            val = None
+            for k in row.keys():
+                if k.lower() == key_ci or k.lower() == base:
+                    val = row[k]; break
+            if levels and val is not None and str(val) not in levels:
+                invalid.append(f"{base.upper()}='{val}' (allowed: {', '.join(levels)})")
         if invalid:
             st.error("Invalid categorical values: " + "; ".join(invalid))
         else:
@@ -278,13 +341,22 @@ with tabs[0]:
                 st.error("Complete the required inputs before scoring: " + ", ".join(missing_now))
             else:
                 try:
-                    df_in = pd.DataFrame([row]).reindex(columns=fields, fill_value=None)
-                    # cast numeric (no categóricas)
-                    cat_fields = set([k.lstrip("_") for k in st.session_state.cat_levels.keys()])
+                    # asegurar columnas alias en el DF (para que el scorer reciba REASON y _REASON_)
+                    fields_full = list(fields)
+                    for nm in set(list(st.session_state.cat_levels_ci.keys()) |
+                                  {"_"+f for f in FORCE_CAT} | set(FORCE_CAT)):
+                        base = nm.lstrip("_")
+                        if base not in fields_full: fields_full.append(base)
+                        alias = "_"+base
+                        if alias not in fields_full: fields_full.append(alias)
+
+                    df_in = pd.DataFrame([row]).reindex(columns=fields_full, fill_value=None)
+                    # cast numérico sólo para no-categóricas (CI)
+                    cat_fields_ci = {k.lstrip("_").lower() for k in st.session_state.cat_levels_ci.keys()} | set(FORCE_CAT)
                     for col in df_in.columns:
-                        if col not in cat_fields:
+                        if col.lower() not in cat_fields_ci:
                             df_in[col] = pd.to_numeric(df_in[col], errors="coerce")
-                    # score
+
                     scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
                     p_raw = scored["prob_BAD"].iloc[0] if "prob_BAD" in scored else float("nan")
                     lbl_raw = scored["label_BAD"].iloc[0] if "label_BAD" in scored else None
@@ -311,21 +383,22 @@ with tabs[1]:
     fields = st.session_state.expected_cols or list(sample_df.columns)
     if not fields:
         st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
-    row_rest = build_single_record_form(fields, sample_df, st.session_state.cat_levels, key_prefix="viya_single")
+    row_rest = build_single_record_form(fields, sample_df, st.session_state.cat_levels_ci, key_prefix="viya_single")
 
     st.markdown("## 3) Score on Viya (REST)")
     do_rest  = st.button("Score on Viya (REST)", use_container_width=True, key="btn_viya_single")
 
     if do_rest:
-        # aliases
-        copy_aliases_inplace(row_rest, st.session_state.cat_levels)
-        # validar categóricas
+        copy_aliases_inplace_ci(row_rest, st.session_state.cat_levels_ci)
         invalid = []
-        for catvar, levels in st.session_state.cat_levels.items():
-            base = catvar.lstrip("_")
-            val = row_rest.get(catvar, row_rest.get(base, None))
-            if val is not None and str(val) not in levels:
-                invalid.append(f"{base}='{val}' (allowed: {', '.join(levels)})")
+        for key_ci, levels in st.session_state.cat_levels_ci.items():
+            base = key_ci.lstrip("_")
+            val = None
+            for k in row_rest.keys():
+                if k.lower() == key_ci or k.lower() == base:
+                    val = row_rest[k]; break
+            if levels and val is not None and str(val) not in levels:
+                invalid.append(f"{base.upper()}='{val}' (allowed: {', '.join(levels)})")
         if invalid:
             st.error("Invalid categorical values: " + "; ".join(invalid))
         else:
@@ -357,17 +430,20 @@ with tabs[2]:
                 if c not in df.columns:
                     df[c] = None
             df = df[fields]
-            # copiar aliases a nivel DF
-            for catvar in st.session_state.cat_levels.keys():
-                base = catvar.lstrip("_")
-                if catvar not in df.columns and base in df.columns:
-                    df[catvar] = df[base]
-                if base not in df.columns and catvar in df.columns:
-                    df[base] = df[catvar]
-            # cast numeric (no categóricas)
-            cat_fields = set([k.lstrip("_") for k in st.session_state.cat_levels.keys()])
+
+            # aliases en DF
+            for nm in set(list(st.session_state.cat_levels_ci.keys()) |
+                          {"_"+f for f in FORCE_CAT} | set(FORCE_CAT)):
+                base = nm.lstrip("_")
+                if nm in df.columns and base not in df.columns:
+                    df[base] = df[nm]
+                if base in df.columns and ("_"+base) not in df.columns:
+                    df["_"+base] = df[base]
+
+            # cast numérico sólo para no-categóricas
+            cat_fields_ci = {k.lstrip("_").lower() for k in st.session_state.cat_levels_ci.keys()} | set(FORCE_CAT)
             for col in df.columns:
-                if col not in cat_fields:
+                if col.lower() not in cat_fields_ci:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
 
             c1, c2 = st.columns(2)
@@ -424,8 +500,8 @@ with tabs[2]:
 # ---- Info ----
 with tabs[3]:
     st.markdown("## Info")
-    sas_path = find_sas_score_file()
-    st.write("- SAS score file:", f"`{sas_path}`" if sas_path else "_not found_")
+    sas_file = find_sas_score_file()
+    st.write("- SAS score file:", f"`{sas_file}`" if sas_file else "_not found_")
     st.write("- Inputs from inputVar.json:", len(expected_from_json))
     if expected_auto_for_info:
         with st.expander("Inputs detected from SAS (missing(...))"):
@@ -437,8 +513,4 @@ with tabs[3]:
     if st.session_state.expected_cols:
         with st.expander("Show expected input fields"):
             st.code("\n".join(st.session_state.expected_cols))
-    st.write("- Sample data rows:", len(sample_df))
-    if not sample_df.empty:
-        with st.expander("Preview sample data"):
-            st.dataframe(sample_df.head(20))
-    st.caption(f"Tip: if the SAS file is DS2/ASTORE (contains scoreRecord/package), use the Viya REST tab. Otherwise, translate and score in {ENGINE_LABEL}.")
+    st.write("- Forced categoricals:", ", ".join(sorted(FORCE_CAT)) or "—")
