@@ -1,3 +1,7 @@
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$VIYA_URL/microanalyticScore/modules/$MAS_MODULE_ID" | python3 -m json.tool | head -n 50
+
+
 export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
 export MAS_MODULE_ID="gradient_boosting__interactive-m"   
 # Si usan CA privada:
