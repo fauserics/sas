@@ -1,44 +1,10 @@
 # viya_mas_client.py
-# Minimal, robust MAS client for SAS Viya scoring from Streamlit/GitHub.
-# Works with: BEARER_TOKEN / SAS_SERVICES_TOKEN, or password grant via SASLogon.
-# Also lets you pull the module input schema and save it to score/inputVar.json.
+# Cliente MAS para SAS Viya con bypass de proxy opcional, timeouts explícitos y diagnóstico.
 
-import os
-import json
-import base64
-import requests
+import os, json, socket, requests
 from typing import Dict, List, Optional, Tuple
 
-# --------- ENV VARS (set in Streamlit Secrets or environment) ----------
-# VIYA_URL           : https://your-viya.domain
-# MAS_MODULE_ID      : module id/uuid (from publish step)
-# BEARER_TOKEN       : optional pre-issued OAuth/JWT
-# SAS_SERVICES_TOKEN : optional service-to-service token (same as bearer)
-# VIYA_USER          : optional, username (password grant)
-# VIYA_PASSWORD      : optional, password (password grant)
-# SAS_CLIENT_ID      : optional, oauth client id (default: viya_client)
-# SAS_CLIENT_SECRET  : optional, oauth client secret
-# OAUTH_TOKEN_URL    : optional, defaults to {VIYA_URL}/SASLogon/oauth/token
-# VIYA_TLS_VERIFY    : "0" or "1" (default 1). If "0", skip TLS verify (dev only!)
-# VIYA_CA_BUNDLE     : optional path to CA bundle file to verify TLS
-
-def _bool_env(name: str, default: bool = True) -> bool:
-    val = os.getenv(name)
-    if val is None:
-        return default
-    return str(val).strip() not in ("0", "false", "False", "NO", "no")
-
-def _session() -> requests.Session:
-    s = requests.Session()
-    verify = _bool_env("VIYA_TLS_VERIFY", True)
-    ca = os.getenv("VIYA_CA_BUNDLE", None)
-    if not verify:
-        s.verify = False
-    elif ca:
-        s.verify = ca
-    # reasonable timeouts
-    s.timeout = (10, 30)  # (connect, read)
-    return s
+# ----------------- Helpers de configuración -----------------
 
 def _get_base() -> str:
     base = (os.getenv("VIYA_URL") or "").rstrip("/")
@@ -46,47 +12,81 @@ def _get_base() -> str:
         raise RuntimeError("VIYA_URL is not set.")
     return base
 
-def _bearer_from_env() -> Optional[str]:
-    tok = os.getenv("BEARER_TOKEN") or os.getenv("SAS_SERVICES_TOKEN")
-    if tok:
-        return tok.strip()
-    return None
+def _module_id() -> str:
+    mid = (os.getenv("MAS_MODULE_ID") or "").strip()
+    if not mid:
+        raise RuntimeError("MAS_MODULE_ID is not set.")
+    return mid
+
+def _bool_env(name: str, default: bool = True) -> bool:
+    v = os.getenv(name)
+    if v is None: return default
+    return str(v).strip().lower() not in ("0","false","no")
+
+def _verify_arg():
+    # TLS verify según secrets
+    if not _bool_env("VIYA_TLS_VERIFY", True):
+        return False
+    cab = os.getenv("VIYA_CA_BUNDLE")
+    return cab if cab else True
+
+def _timeouts() -> Tuple[float, float]:
+    # Timeouts explícitos (connect, read). Defaults seguros.
+    def _f(k, d):
+        try:
+            val = os.getenv(k)
+            return float(val) if val not in (None, "", "None") else float(d)
+        except Exception:
+            return float(d)
+    return (_f("VIYA_TIMEOUT_CONNECT", 30.0), _f("VIYA_TIMEOUT_READ", 120.0))
+
+def _token_from_env() -> Optional[str]:
+    tok = (os.getenv("BEARER_TOKEN") or os.getenv("SAS_SERVICES_TOKEN") or "").strip()
+    if not tok:
+        return None
+    return tok.replace("\n","").replace("\r","").strip()
 
 def _oauth_token_url() -> str:
-    base = _get_base()
-    return os.getenv("OAUTH_TOKEN_URL", f"{base}/SASLogon/oauth/token")
+    return os.getenv("OAUTH_TOKEN_URL", f"{_get_base()}/SASLogon/oauth/token")
 
-def _get_client_auth() -> Tuple[str, str]:
-    cid = os.getenv("SAS_CLIENT_ID", "viya_client")
-    csc = os.getenv("SAS_CLIENT_SECRET", "")
-    return cid, csc
+def _client_auth() -> Tuple[str, str]:
+    return os.getenv("SAS_CLIENT_ID", "viya_client"), os.getenv("SAS_CLIENT_SECRET", "")
 
-def _get_password_creds() -> Optional[Tuple[str, str]]:
+def _password_creds() -> Optional[Tuple[str, str]]:
     u, p = os.getenv("VIYA_USER"), os.getenv("VIYA_PASSWORD")
-    if u and p:
-        return u, p
+    if u and p: return u, p
     return None
 
-def _fetch_token_with_password_grant() -> Optional[str]:
-    creds = _get_password_creds()
+# ----------------- Sesión HTTP -----------------
+
+def _session(no_proxy: bool = False) -> requests.Session:
+    s = requests.Session()
+    # Si querés ignorar completamente variables de proxy del entorno:
+    force = os.getenv("VIYA_FORCE_NO_PROXY", "").strip().lower() in ("1","true","yes")
+    if no_proxy or force:
+        s.trust_env = False
+        s.proxies.clear()
+    else:
+        s.trust_env = True  # respeta HTTPS_PROXY/HTTP_PROXY/NO_PROXY
+        p = os.getenv("PROXY_URL")
+        if p:
+            s.proxies.update({"http": p, "https": p})
+    return s
+
+# ----------------- OAuth (si no hay token en secrets) -----------------
+
+def _fetch_token_with_password_grant() -> str:
+    creds = _password_creds()
     if not creds:
-        return None
-    cid, csc = _get_client_auth()
-    token_url = _oauth_token_url()
-    sess = _session()
-    data = {
-        "grant_type": "password",
-        "username": creds[0],
-        "password": creds[1],
-        "scope": "openid"
-    }
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    # Basic auth with client_id:client_secret
-    auth = None
-    if cid:
-        # If client secret is empty, most Viya setups still allow well-known public clients.
-        auth = (cid, csc)
-    r = sess.post(token_url, data=data, headers=headers, auth=auth)
+        raise RuntimeError("No token and no VIYA_USER/VIYA_PASSWORD provided.")
+    cid, csc = _client_auth()
+    r = _session().post(
+        _oauth_token_url(),
+        data={"grant_type":"password","username":creds[0],"password":creds[1],"scope":"openid"},
+        auth=(cid, csc),
+        headers={"Content-Type":"application/x-www-form-urlencoded"},
+        verify=_verify_arg(), timeout=_timeouts()
+    )
     if r.status_code >= 400:
         raise RuntimeError(f"Token error ({r.status_code}): {r.text}")
     tok = r.json().get("access_token")
@@ -95,86 +95,117 @@ def _fetch_token_with_password_grant() -> Optional[str]:
     return tok
 
 def _get_token() -> str:
-    # 1) Try env-provided token
-    t = _bearer_from_env()
-    if t:
-        return t
-    # 2) Try password grant
-    t = _fetch_token_with_password_grant()
-    if t:
-        return t
-    raise RuntimeError("No token available. Set BEARER_TOKEN or configure VIYA_USER/VIYA_PASSWORD (+ SAS_CLIENT_ID/SECRET).")
+    tok = _token_from_env()
+    if tok: return tok
+    return _fetch_token_with_password_grant()
 
 def _auth_headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {_get_token()}"}
 
-def _module_id() -> str:
-    mid = os.getenv("MAS_MODULE_ID", "").strip()
-    if not mid:
-        raise RuntimeError("MAS_MODULE_ID is not set.")
-    return mid
+# ----------------- API pública -----------------
 
-# ---------------------- PUBLIC API ---------------------------------
+def ping() -> bool:
+    try:
+        _ = list_modules(limit=1)
+        return True
+    except Exception:
+        return False
 
-def get_module_info() -> Dict:
-    """Fetch MAS module metadata (includes inputs/outputs schema)."""
-    base = _get_base()
-    mid = _module_id()
-    url = f"{base}/microanalyticScore/modules/{mid}"
-    sess = _session()
-    r = sess.get(url, headers=_auth_headers())
+def list_modules(limit: int = 200) -> List[Dict]:
+    url = f"{_get_base()}/microanalyticScore/modules?limit={int(limit)}"
+    r = _session().get(url, headers=_auth_headers(), verify=_verify_arg(), timeout=_timeouts())
+    if r.status_code >= 400:
+        raise RuntimeError(f"list_modules error ({r.status_code}): {r.text}")
+    data = r.json()
+    items = data.get("items") if isinstance(data, dict) else data
+    return items or []
+
+def get_module_info(module_id: Optional[str] = None) -> Dict:
+    mid = module_id or _module_id()
+    url = f"{_get_base()}/microanalyticScore/modules/{mid}"
+    r = _session().get(url, headers=_auth_headers(), verify=_verify_arg(), timeout=_timeouts())
     if r.status_code >= 400:
         raise RuntimeError(f"get_module_info error ({r.status_code}): {r.text}")
     return r.json()
 
-def get_module_inputs() -> List[Dict]:
-    """Return a simplified list: [{'name':..., 'type':...}, ...]"""
-    info = get_module_info()
+def get_module_inputs(module_id: Optional[str] = None) -> List[Dict]:
+    info = get_module_info(module_id=module_id)
     inputs = info.get("inputs") or []
-    out = []
-    for it in inputs:
-        out.append({"name": it.get("name"), "type": it.get("type")})
-    return out
+    return [{"name": it.get("name"), "type": it.get("type")} for it in inputs]
 
 def build_example_payload(row: Dict) -> Dict:
-    """Map a python dict row -> MAS payload {'inputs':[{'name':..,'value':..},...] }"""
-    # MAS is strict with names; use as-is. You may add mapping here if needed.
-    payload = {"inputs": []}
-    for k, v in row.items():
-        payload["inputs"].append({"name": k, "value": v})
-    return payload
+    return {"inputs": [{"name": k, "value": v} for k, v in row.items()]}
 
-def score_row_via_rest(row: Dict) -> Dict:
-    """
-    POST /microanalyticScore/modules/{id}/steps/score
-    Returns raw json dict (MAS format). The app parses it with parse_mas_outputs().
-    """
-    base = _get_base()
-    mid = _module_id()
-    url = f"{base}/microanalyticScore/modules/{mid}/steps/score"
+def score_row_via_rest(row: Dict, module_id: Optional[str] = None) -> Dict:
+    mid = module_id or _module_id()
+    url = f"{_get_base()}/microanalyticScore/modules/{mid}/steps/score"
+    # *** Importante: timeout explícito y sesión sin proxy si así se pide ***
     sess = _session()
-    payload = build_example_payload(row)
-    r = sess.post(url, json=payload, headers=_auth_headers())
+    r = sess.post(url, json=build_example_payload(row),
+                  headers=_auth_headers(), verify=_verify_arg(),
+                  timeout=_timeouts())
     if r.status_code >= 400:
         raise RuntimeError(f"score_row_via_rest error ({r.status_code}): {r.text}")
     return r.json()
 
-def sync_input_schema_to_file(path: str = "score/inputVar.json") -> List[str]:
-    """
-    Pull input schema from MAS and write to score/inputVar.json.
-    Returns the list of variable names.
-    """
-    vars = get_module_inputs()
+# Variante "directa" que ignora proxy (para diagnóstico puntual)
+def score_row_via_rest_noproxy(row: Dict, module_id: Optional[str] = None) -> Dict:
+    mid = module_id or _module_id()
+    url = f"{_get_base()}/microanalyticScore/modules/{mid}/steps/score"
+    r = _session(no_proxy=True).post(
+        url, json=build_example_payload(row),
+        headers=_auth_headers(), verify=_verify_arg(),
+        timeout=_timeouts()
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(f"score_row_via_rest_noproxy error ({r.status_code}): {r.text}")
+    return r.json()
+
+def sync_input_schema_to_file(path: str = "score/inputVar.json", module_id: Optional[str] = None) -> List[str]:
+    vars = get_module_inputs(module_id=module_id)
     names = [v["name"] for v in vars if v.get("name")]
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"inputVariables": [{"name": n} for n in names]}, f, indent=2)
     return names
 
-def ping() -> bool:
-    """Simple check: can we read module info?"""
+# ----------------- Diagnóstico -----------------
+
+def connectivity_check() -> Dict:
+    info = {
+        "base": _get_base(),
+        "timeouts": _timeouts(),
+        "env": {
+            "HTTPS_PROXY": os.getenv("HTTPS_PROXY"),
+            "HTTP_PROXY": os.getenv("HTTP_PROXY"),
+            "NO_PROXY": os.getenv("NO_PROXY"),
+            "VIYA_FORCE_NO_PROXY": os.getenv("VIYA_FORCE_NO_PROXY"),
+            "VIYA_TLS_VERIFY": os.getenv("VIYA_TLS_VERIFY"),
+        }
+    }
     try:
-        _ = get_module_info()
-        return True
-    except Exception:
-        return False
+        host = info["base"].split("://",1)[-1].split("/",1)[0]
+        info["dns"] = {"host": host, "ip": socket.gethostbyname(host)}
+    except Exception as e:
+        info["dns_error"] = repr(e)
+
+    # intentamos listar módulos con y sin proxy
+    try:
+        url = f"{info['base']}/microanalyticScore/modules?limit=1"
+        r = _session().get(url, headers=_auth_headers(), verify=_verify_arg(), timeout=_timeouts())
+        info["list_with_proxy"] = {"status": r.status_code, "ok": (r.status_code==200)}
+        if r.status_code != 200:
+            info["list_with_proxy"]["body"] = r.text[:400]
+    except Exception as e:
+        info["list_with_proxy_error"] = repr(e)
+
+    try:
+        url = f"{info['base']}/microanalyticScore/modules?limit=1"
+        r = _session(no_proxy=True).get(url, headers=_auth_headers(), verify=_verify_arg(), timeout=_timeouts())
+        info["list_noproxy"] = {"status": r.status_code, "ok": (r.status_code==200)}
+        if r.status_code != 200:
+            info["list_noproxy"]["body"] = r.text[:400]
+    except Exception as e:
+        info["list_noproxy_error"] = repr(e)
+
+    return info
