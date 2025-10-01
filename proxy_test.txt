@@ -1,3 +1,26 @@
+export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
+export CAS_HOST="$(printf '%s' "$VIYA_URL" | sed -E 's#^https?://##; s#/.*$##')"
+export NO_PROXY="$CAS_HOST,.$(echo "$CAS_HOST" | cut -d. -f2-)"
+
+export VIYA_USER="<tu_usuario>"
+export VIYA_PASSWORD="<tu_password>"
+
+TOKEN=$(curl -s -m 10 -u sas.ec: \
+  -d "grant_type=password&username=$VIYA_USER&password=$VIYA_PASSWORD" \
+  "$VIYA_URL/SASLogon/oauth/token" | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])')
+
+curl -s -m 10 -H "Authorization: Bearer $TOKEN" \
+  "https://$CAS_HOST/microanalyticScore/modules?limit=1" \
+  -w "\nHTTP %{http_code}\n"
+
+
+
+
+
+
+
+
+
 curl -s -m 5 -H "Authorization: Bearer $SAS_SERVICES_TOKEN" \
   "https://$CAS_HOST/microanalyticScore/modules?limit=1" \
   -w "\nHTTP %{http_code}\n"
