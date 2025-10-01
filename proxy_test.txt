@@ -1,4 +1,10 @@
 # VIYA REST
+
+#SAS
+%put NOTE: SAS_SERVICES_TOKEN=%sysget(SAS_SERVICES_TOKEN);
+%put NOTE: SAS_ACCESS_TOKEN=%sysget(SAS_ACCESS_TOKEN);
+
+#CLI
 curl -s -X POST \
   -u "viya_client:" \
   -H "Content-Type: application/x-www-form-urlencoded" \
