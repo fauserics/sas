@@ -1,370 +1,350 @@
-# app.py
-# Real Time Scoring App (powered by SAS)
-# Engines:
-#  1) GitHub (Python): translate SAS DATA step score code -> Python and run locally
-#  2) Viya REST: call MAS scoring endpoint
+# sas_code_translator.py
+# Translate SAS DATA step scoring code -> Python function.
+# Robust logistic fallback (no indent blocks) for VDMML exports.
 
-import os
-import re
-import json
+import re, math
 import pandas as pd
-import streamlit as st
+from typing import Callable, List, Tuple
 
-from sas_code_translator import compile_sas_score, score_dataframe as score_df_local
-from viya_mas_client import score_row_via_rest  # needs VIYA_URL, MAS_MODULE_ID, token/creds
+# ===== runtime helpers =====
+def MISSING(x):
+    return x is None or (isinstance(x, float) and math.isnan(x)) or (isinstance(x, str) and x == "")
 
-APP_TITLE = "Real Time Scoring App (powered by SAS)"
-ENGINE_LABEL = "GitHub (Python)"
+def MEAN(*args):
+    vals = [float(v) for v in args if not MISSING(v)]
+    return sum(vals)/len(vals) if vals else float("nan")
 
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-st.title(APP_TITLE)
+def SUM(*args):
+    return sum(float(v) for v in args if not MISSING(v))
 
-SCORE_DIR = "score"
-DATA_DIR = "data"
+def NMISS(*args):
+    return sum(1 for v in args if MISSING(v))
 
-# ---------- helpers ----------
-def find_sas_score_file() -> str | None:
-    preferred = ["score_code.sas", "model_score.sas", "model_score_code.sas", "dmcas_scorecode.sas"]
-    for name in preferred:
-        p = os.path.join(SCORE_DIR, name)
-        if os.path.isfile(p):
-            return p
-    if not os.path.isdir(SCORE_DIR):
-        return None
-    for fn in sorted(os.listdir(SCORE_DIR)):
-        if fn.lower().endswith(".sas"):
-            return os.path.join(SCORE_DIR, fn)
+def COALESCE(*args):
+    for v in args:
+        if not MISSING(v): return v
     return None
 
-def load_file_text(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+# ===== core text utils =====
+def _strip_comments(s: str) -> str:
+    s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)
+    s = re.sub(r"^\s*\*.*?;\s*$", "", s, flags=re.M)
+    return s
 
-@st.cache_data
-def load_input_vars() -> list[str]:
-    p = os.path.join(SCORE_DIR, "inputVar.json")
-    if not os.path.isfile(p):
-        return []
-    try:
-        data = json.load(open(p, "r", encoding="utf-8"))
-        if isinstance(data, list) and data and isinstance(data[0], dict) and "name" in data[0]:
-            return [d["name"] for d in data]
-        if isinstance(data, dict):
-            if "variables" in data and isinstance(data["variables"], list):
-                return [d.get("name") for d in data["variables"] if "name" in d]
-            if "inputVariables" in data and isinstance(data["inputVariables"], list):
-                return [d.get("name") for d in data["inputVariables"] if "name" in d]
-    except Exception:
-        pass
-    return []
-
-def _sanitize_var(v: str) -> str:
-    v = v.strip()
-    m = re.match(r"^'([^']+)'\s*n$", v, flags=re.I)
-    if m:
-        v = m.group(1)
-    v = re.sub(r"\W", "_", v)
-    return v
-
-def extract_expected_inputs_from_sas(code: str) -> list[str]:
-    miss_names = set(_sanitize_var(x) for x in re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", code, flags=re.I))
-    if re.search(r"\bREASON\b", code, flags=re.I):
-        miss_names.add("REASON")
-    drop_prefixes = ("_", "EM_", "P_", "I_", "va__d__E_")
-    keep = [n for n in miss_names if n and not n.upper().startswith(drop_prefixes)]
-    return sorted(keep, key=str.upper)
-
-@st.cache_data
-def load_sample_df(expected_cols: list[str]) -> pd.DataFrame:
-    for cand in [os.path.join(DATA_DIR, "sample.csv"), os.path.join(DATA_DIR, "hmeq.csv")]:
-        if os.path.isfile(cand):
-            try:
-                df = pd.read_csv(cand)
-                return df.drop(columns=["BAD"], errors="ignore")
-            except Exception:
-                pass
-    return pd.DataFrame(columns=expected_cols)
-
-def parse_mas_outputs(resp_json: dict, threshold: float = 0.5) -> tuple[float, int | None]:
-    prob = None; label = None
-    outputs = resp_json.get("outputs")
-    if isinstance(outputs, list):
-        d = {o.get("name"): o.get("value") for o in outputs if isinstance(o, dict)}
-        prob = d.get("EM_EVENTPROBABILITY") or d.get("P_BAD1") or d.get("P_1") or d.get("EM_PREDICTION")
-        label = d.get("EM_CLASSIFICATION") or d.get("I_BAD") or d.get("LABEL")
-    if prob is None:
-        for k in ("EM_EVENTPROBABILITY","P_BAD1","P_1","EM_PREDICTION","probability","score"):
-            if k in resp_json:
-                prob = resp_json[k]; break
-    if label is None:
-        for k in ("EM_CLASSIFICATION","I_BAD","LABEL"):
-            if k in resp_json:
-                label = resp_json[k]; break
-    try:
-        p = None if prob is None else float(prob)
-    except Exception:
-        p = None
-    try:
-        lbl = None if label is None else (int(label) if str(label).isdigit() else (1 if (p is not None and p >= threshold) else 0))
-    except Exception:
-        lbl = (1 if (p is not None and p >= threshold) else 0)
-    return (p if p is not None else float("nan")), lbl
-
-def build_single_record_form(fields: list[str], sample: pd.DataFrame, key_prefix: str) -> dict:
-    defaults = {}
-    if not sample.empty:
-        for c in fields:
-            if c in sample.columns:
-                s = sample[c]
-                if pd.api.types.is_numeric_dtype(s):
-                    defaults[c] = float(s.dropna().median()) if s.notna().any() else 0.0
-                else:
-                    defaults[c] = str(s.dropna().mode().iloc[0]) if s.notna().any() else ""
-            else:
-                defaults[c] = 0.0
-    else:
-        for c in fields:
-            defaults[c] = 0.0
-
-    left, right = st.columns(2)
-    row = {}
-    for i, c in enumerate(fields):
-        tgt = left if i % 2 == 0 else right
-        key = f"{key_prefix}__{c}"
-        if c in sample.columns and pd.api.types.is_numeric_dtype(sample[c]):
-            row[c] = tgt.number_input(c, value=float(defaults.get(c, 0.0)), key=key)
+def _split_statements(sas_code: str) -> List[str]:
+    out, buf, q = [], [], None
+    for ch in sas_code:
+        if q:
+            buf.append(ch)
+            if ch == q: q = None
         else:
-            opts = []
-            if c in sample.columns and not sample.empty:
-                vals = sample[c].dropna().astype(str).unique().tolist()
-                if 1 <= len(vals) <= 50:
-                    opts = sorted(vals)
-            if opts:
-                row[c] = tgt.selectbox(c, opts, index=0, key=key)
+            if ch in ("'", '"'):
+                q = ch; buf.append(ch)
+            elif ch == ';':
+                out.append(''.join(buf).strip()); buf = []
             else:
-                row[c] = tgt.text_input(c, value=str(defaults.get(c, "")), key=key)
-    return row
+                buf.append(ch)
+    if buf: out.append(''.join(buf).strip())
+    return [x for x in out if x]
 
-def is_ds2_astore(code: str) -> bool:
-    sigs = ("package score", "dcl package score", "scoreRecord()", "method run()", "enddata;")
-    return any(s in code for s in sigs)
+def _clean_stmt(stmt: str) -> str:
+    if re.match(r"^\s*(label|length|format|drop|keep|dcl|declare|retain|array|return|options)\b", stmt, flags=re.I):
+        return ""
+    if re.match(r"^\s*(package|method|enddata|run)\b", stmt, flags=re.I):
+        return ""
+    stmt = stmt.replace("||", "+")
+    stmt = re.sub(r"=\s*\.", "= None", stmt)
+    stmt = re.sub(r"\bEQ\b", "==", stmt, flags=re.I)
+    stmt = re.sub(r"\bNE\b", "!=", stmt, flags=re.I)
+    stmt = re.sub(r"\bGE\b", ">=", stmt, flags=re.I)
+    stmt = re.sub(r"\bLE\b", "<=", stmt, flags=re.I)
+    stmt = re.sub(r"\bGT\b", ">", stmt, flags=re.I)
+    stmt = re.sub(r"\bLT\b", "<", stmt, flags=re.I)
+    stmt = re.sub(r"\bAND\b", "and", stmt, flags=re.I)
+    stmt = re.sub(r"\bOR\b", "or", stmt, flags=re.I)
+    stmt = re.sub(r"\bNOT\b", "not", stmt, flags=re.I)
+    stmt = re.sub(r"\bLOG\(", "math.log(", stmt, flags=re.I)
+    stmt = re.sub(r"\bEXP\(", "math.exp(", stmt, flags=re.I)
+    stmt = re.sub(r"\bABS\(", "abs(", stmt, flags=re.I)
+    stmt = re.sub(r"\bSQRT\(", "math.sqrt(", stmt, flags=re.I)
+    stmt = re.sub(r"\bMAX\(", "max(", stmt, flags=re.I)
+    stmt = re.sub(r"\bMIN\(", "min(", stmt, flags=re.I)
+    stmt = re.sub(r"\bMEAN\(", "MEAN(", stmt, flags=re.I)
+    stmt = re.sub(r"\bSUM\(", "SUM(", stmt, flags=re.I)
+    stmt = re.sub(r"\bNMISS\(", "NMISS(", stmt, flags=re.I)
+    stmt = re.sub(r"\bCOALESCE\(", "COALESCE(", stmt, flags=re.I)
+    if re.match(r"^\s*if\b", stmt, flags=re.I):
+        stmt = re.sub(r"(?<![<>=!])=(?![=])", "==", stmt)
+    return stmt.strip()
 
-# ---------- sidebar ----------
-with st.sidebar:
-    st.markdown("### Settings")
-    thr = st.slider("Decision threshold (BAD=1)", 0.0, 1.0, 0.50, 0.01)
-    st.markdown("---")
-    st.markdown("**Viya REST env**")
-    st.caption(f"VIYA_URL: {os.getenv('VIYA_URL') or '(not set)'}")
-    st.caption(f"MAS_MODULE_ID: {os.getenv('MAS_MODULE_ID') or '(not set)'}")
-    has_token = bool(os.getenv("BEARER_TOKEN") or os.getenv("SAS_SERVICES_TOKEN") or os.getenv("VIYA_USER"))
-    st.caption(f"Auth: {'configured' if has_token else 'missing'}")
-    # Opcional: recargar inputVar.json sin reiniciar
-    if st.button("Reload inputVar.json"):
-        load_input_vars.clear()
-        st.session_state.expected_cols = load_input_vars()
-        st.success("inputVar.json reloaded.")
+# ===== preprocessing for VDMML Logistic DATA step =====
+def _sanitize_name_literals(txt: str) -> str:
+    # 'VAR'n -> VAR
+    def repl(m):
+        raw = m.group(1)
+        s = re.sub(r"\W", "_", raw)
+        return s if s else "_Q_"
+    return re.sub(r"'([^']+?)'\s*n", repl, txt, flags=re.I)
 
-# ---------- load inputs and sample ----------
-expected_from_json = load_input_vars()
-sas_path = find_sas_score_file()
-if not sas_path:
-    st.warning("No SAS score file found under ./score. Place your exported DATA step (*.sas) there.")
-else:
-    st.caption(f"Using SAS score file: `{sas_path}`")
+def _braces_to_brackets(txt: str) -> str:
+    txt = re.sub(r"\{", "[", txt)
+    txt = re.sub(r"\}", "]", txt)
+    return txt
 
-sample_df = load_sample_df(expected_from_json)
+def _arrays_to_python_lists(txt: str) -> str:
+    out_lines = []
+    for line in txt.splitlines():
+        m = re.match(r"\s*array\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*\((.*?)\)\s*;", line, flags=re.I|re.S)
+        if m:
+            name, n, vals = m.group(1), int(m.group(2)), m.group(3).strip()
+            out_lines.append(f"{name} = [None] + [{vals}]")
+            continue
+        m2 = re.match(r"\s*array\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*;", line, flags=re.I)
+        if m2:
+            name, n = m2.group(1), int(m2.group(2))
+            out_lines.append(f"{name} = [0.0] * ({n}+1)")
+            continue
+        # Dot product loop (one-liner, no inner indent)
+        m3 = re.match(
+            r"\s*do\s+[A-Za-z_]\w*\s*=\s*1\s*to\s*(\d+)\s*;\s*_linp_\s*\+\s*([A-Za-z_]\w*)\s*\[\s*_[A-Za-z_]\w*_\s*\]\s*\*\s*([A-Za-z_]\w*)\s*\[\s*_[A-Za-z_]\w*_\s*\]\s*;\s*end\s*;",
+            line, flags=re.I
+        )
+        if m3:
+            n, a1, a2 = int(m3.group(1)), m3.group(2), m3.group(3)
+            out_lines.append(f"_linp_ = _linp_ + (sum({a1}[i] * {a2}[i] for i in range(1, {n}+1)) if _badval_ == 0 else 0.0)")
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines)
 
-# ---------- session state ----------
-if "score_fn" not in st.session_state:
-    st.session_state.score_fn = None
-if "score_py" not in st.session_state:
-    st.session_state.score_py = ""
-if "expected_cols" not in st.session_state:
-    st.session_state.expected_cols = expected_from_json
+def preprocess_vdmml_logit_datastep(sas_code: str) -> str:
+    s = _sanitize_name_literals(sas_code)
+    s = _braces_to_brackets(s)
+    s = _arrays_to_python_lists(s)
+    # remove labels/goto + decls
+    s = re.sub(r"^\s*\w+\s*:\s*$", "", s, flags=re.M)
+    s = re.sub(r"\bgoto\s+\w+\s*;", "", s, flags=re.I)
+    s = re.sub(r"^\s*(drop|length|label|format|options)\b.*?$", "", s, flags=re.I|re.M)
+    return s
 
-# ---------- translation ----------
-st.markdown("## 1) Translate SAS score code to Python")
-col_t1, col_t2 = st.columns([1, 3])
-with col_t1:
-    can_translate = st.button("Translate SAS → Python", type="primary", use_container_width=True, disabled=not bool(sas_path))
-with col_t2:
-    st.caption(f"Translates your SAS DATA step score code into a Python function (runs in {ENGINE_LABEL}).")
+# ===== generic translator (puede fallar por indent) =====
+def translate_sas_to_python_body(sas_code: str) -> Tuple[str, List[str]]:
+    code = _strip_comments(sas_code)
+    stmts = _split_statements(code)
+    py_lines, inputs, created = [], set(), set()
+    indent = 0
 
-sas_is_ds2 = False
-if can_translate and sas_path:
-    raw_code = load_file_text(sas_path)
-    sas_is_ds2 = is_ds2_astore(raw_code)
-    if sas_is_ds2:
-        st.warning("This SAS file looks like DS2/ASTORE (e.g., scoreRecord). Translation is not supported. Use 'Score on Viya (REST)'.")
-    else:
-        try:
-            expected_auto = extract_expected_inputs_from_sas(raw_code)
-            score_fn, py_code, expected = compile_sas_score(
-                raw_code, func_name="sas_score",
-                expected_inputs=(expected_from_json or expected_auto or None)
-            )
-            st.session_state.score_fn = score_fn
-            st.session_state.score_py = py_code
-            st.session_state.expected_cols = expected_from_json or expected_auto or expected or []
-            st.success(f"Translation OK. Found {len(st.session_state.expected_cols)} input fields.")
-        except Exception as e:
-            st.error(f"Translation failed: {e}")
+    re_if   = re.compile(r"^\s*if\b(.*)\bthen\b\s*(do)?\s*$", flags=re.I)
+    re_else = re.compile(r"^\s*else\b\s*(do)?\s*$", flags=re.I)
+    re_end  = re.compile(r"^\s*end\s*$", flags=re.I)
+    re_asg  = re.compile(r"^\s*([A-Za-z_]\w*(?:\[[^\]]+\])?)\s*=\s*(.+)$")
 
-with st.expander("Show generated Python score code", expanded=False):
-    if st.session_state.score_py:
-        st.code(st.session_state.score_py, language="python")
-        save_py = st.toggle("Save generated Python to file (score/translated_score.py)", value=False, key="save_py_toggle")
-        if save_py:
-            os.makedirs("score", exist_ok=True)
-            outp = os.path.join("score", "translated_score.py")
-            with open(outp, "w", encoding="utf-8") as f:
-                f.write(st.session_state.score_py)
-            st.success(f"Saved: {outp}")
-    else:
-        st.info("Translate first to view the generated code.")
+    for raw in stmts:
+        st = _clean_stmt(raw)
+        if not st: continue
+        if re_end.match(st):
+            indent = max(0, indent-1); continue
+        m_if = re_if.match(st)
+        if m_if:
+            cond = m_if.group(1).strip()
+            py_lines.append("    "*indent + f"if {cond}:")
+            indent += 1; continue
+        if re_else.match(st):
+            indent = max(0, indent-1)
+            py_lines.append("    "*indent + "else:")
+            indent += 1; continue
+        m_as = re_asg.match(st)
+        if m_as:
+            var, expr = m_as.group(1), m_as.group(2)
+            created.add(re.sub(r"\[.*?\]","",var).upper())
+            py_lines.append("    "*indent + f"{var} = {expr}")
+            for tok in re.findall(r"[A-Za-z_]\w*", expr):
+                base = tok.upper()
+                if base not in {
+                    "IF","ELSE","AND","OR","NOT","MISSING","MEAN","SUM","NMISS","COALESCE",
+                    "LOG","EXP","ABS","SQRT","MAX","MIN","MATH","NONE","NAN","TRUE","FALSE",
+                    "_LINP_","_BADVAL_"
+                } and base not in created and not base.startswith("_XROW") and not base.startswith("_BETA"):
+                    inputs.add(tok)
+            continue
+        py_lines.append("    "*indent + st)
+    body = "\n".join(py_lines) if py_lines else "pass"
+    return body, sorted(inputs)
 
-# ---------- tabs ----------
-tabs = st.tabs([f"Single case — {ENGINE_LABEL}", "Single case — Viya (REST)", "CSV batch", "Info"])
+# ===== logistic fallback (plano, sin indent) =====
+def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]:
+    s = preprocess_vdmml_logit_datastep(sas_code)
 
-# ---- Single case — GitHub (Python) ----
-with tabs[0]:
-    st.markdown(f"## 2) Provide inputs for {ENGINE_LABEL}")
-    fields = st.session_state.expected_cols or list(sample_df.columns)
-    if not fields:
-        st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
-    row = build_single_record_form(fields, sample_df, key_prefix="gh_single")
+    # 1) beta array
+    m = re.search(r"array\s+(_beta_[A-Za-z0-9_]+)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*\((.*?)\)\s*;", s, flags=re.I|re.S)
+    if not m:
+        raise SyntaxError("No beta array found for logistic fallback.")
+    beta_name, n_str, beta_vals = m.group(1), m.group(2), m.group(3)
+    n = int(n_str)
+    toks = [t for t in re.split(r"[,\s]+", beta_vals.strip()) if t]
+    if len(toks) != n:
+        raise SyntaxError("Beta length mismatch.")
+    beta = [None] + [float(t) for t in toks]
 
-    st.markdown(f"## 3) Score in {ENGINE_LABEL}")
-    do_local = st.button(f"Score in {ENGINE_LABEL}", type="primary", use_container_width=True, key="btn_gh_single",
-                         disabled=(st.session_state.score_fn is None))
+    # 2) xrow assignments  (FIX: 3 grupos -> name, idx, expr)
+    xrow_name = None
+    x_assigns = {}
+    for name, i_str, expr in re.findall(r"(_xrow_[A-Za-z0-9_]+)\s*\[\s*(\d+)\s*\]\s*=\s*([^;]+);", s, flags=re.I|re.S):
+        xrow_name = xrow_name or name
+        x_assigns[int(i_str)] = expr.strip()
 
-    if do_local:
-        try:
-            df_in = pd.DataFrame([row]).reindex(columns=fields, fill_value=None)
-            scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
-            # ---- SAFE CASTS (evita int(None)) ----
-            p_raw = scored["prob_BAD"].iloc[0] if "prob_BAD" in scored else float("nan")
-            lbl_raw = scored["label_BAD"].iloc[0] if "label_BAD" in scored else None
-            p = None if (pd.isna(p_raw)) else float(p_raw)
-            lbl = None
-            if lbl_raw is not None and not (isinstance(lbl_raw, float) and pd.isna(lbl_raw)):
-                try:
-                    lbl = int(lbl_raw)
-                except Exception:
-                    lbl = None
+    # 3) select/when for a categorical (p.ej., REASON)
+    reason_map, sel_var = {}, None
+    sel = re.search(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;(.+?)end\s*;", s, flags=re.I|re.S)
+    if sel:
+        sel_var = sel.group(1).strip()
+        block = sel.group(2)
+        for cond, stmt in re.findall(r"when\s*\(\s*('.*?')\s*\)\s*([^\;]+)\s*;", block, flags=re.I|re.S):
+            mset = re.search(rf"{re.escape(xrow_name)}\s*\[\s*(\d+)\s*\]\s*=\s*_temp_", stmt, flags=re.I)
+            if mset:
+                reason_map[int(mset.group(1))] = cond.strip()
 
-            if p is None:
-                st.warning("Probability is NaN (likely missing required inputs for the SAS score). Check the form/inputVar.json.")
-            else:
-                st.success(f"Scored in {ENGINE_LABEL}.")
-            c1, c2 = st.columns(2)
-            c1.metric(f"Probability of BAD ({ENGINE_LABEL})", f"{(p if p is not None else float('nan')):0.4f}" if p is not None else "—")
-            c2.metric(f"Predicted label ({ENGINE_LABEL})", "1" if lbl == 1 else ("0" if lbl == 0 else "—"))
-            st.dataframe(scored)
-        except Exception as e:
-            st.error(f"{ENGINE_LABEL} scoring failed: {e}")
+    # 4) required vars by missing(...)
+    miss_vars = re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", s, flags=re.I)
+    def san(v): 
+        m = re.match(r"^'([^']+)'\s*n$", v, flags=re.I)
+        return m.group(1) if m else v
+    required = sorted({san(v) for v in miss_vars})
 
-# ---- Single case — Viya (REST) ----
-with tabs[1]:
-    st.markdown("## 2) Provide inputs for Viya (REST)")
-    fields = st.session_state.expected_cols or list(sample_df.columns)
-    if not fields:
-        st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
-    row_rest = build_single_record_form(fields, sample_df, key_prefix="viya_single")
+    # 5) inputs = required ∪ vars en RHS de x_assigns ∪ sel_var
+    inputs = set(required)
+    for expr in x_assigns.values():
+        for tok in re.findall(r"[A-Za-z_]\w*", expr):
+            U = tok.upper()
+            if U not in {"_TEMP_", "MISSING", "MEAN", "NMISS", "SUM"} and not U.startswith("_XROW") and not U.startswith("_BETA"):
+                inputs.add(tok)
+    if sel_var: inputs.add(sel_var)
+    inputs = sorted(inputs)
 
-    st.markdown("## 3) Score on Viya (REST)")
-    do_rest  = st.button("Score on Viya (REST)", use_container_width=True, key="btn_viya_single")
+    # 6) build scorer (plano)
+    body = []
+    body.append("# fallback logistic scorer (flat)")
+    for v in inputs:
+        body.append(f"{v} = row.get('{v}', None)")
+    body.append("_badval_ = 0")
+    if required:
+        req_list = ", ".join([f"{v}" for v in required])
+        body.append(f"if any(([{req_list}][i] is None or (isinstance([{req_list}][i], float) and math.isnan([{req_list}][i])) or (isinstance([{req_list}][i], str) and [{req_list}][i]=='')) for i in range(len([{req_list}]))) :")
+        body.append("    return {'EM_EVENTPROBABILITY': None}")
 
-    if do_rest:
-        try:
-            with st.spinner("Calling Viya..."):
-                resp = score_row_via_rest(row_rest)
-            p, lbl = parse_mas_outputs(resp, threshold=thr)
-            st.success("Viya scoring done.")
-            c1, c2 = st.columns(2)
-            c1.metric("Probability of BAD (Viya)", f"{p:0.4f}" if not pd.isna(p) else "—")
-            c2.metric("Predicted label (Viya)", "1" if lbl == 1 else ("0" if lbl == 0 else "—"))
-            st.json(resp)
-        except Exception as e:
-            st.error(f"Viya REST error: {e}")
+    body.append(f"x = [0.0]*({n+1})")
 
-# ---- CSV batch ----
-with tabs[2]:
-    st.markdown("## Batch scoring")
-    up = st.file_uploader("Upload a CSV with the input schema", type=["csv"], key="uploader_csv")
-    if up is not None:
-        try:
-            df = pd.read_csv(up)
-            fields = st.session_state.expected_cols or list(df.columns)
-            for c in fields:
-                if c not in df.columns:
-                    df[c] = None
-            df = df[fields]
+    # Intercept si está explicitado
+    if 1 in x_assigns and re.fullmatch(r"1(\.0+)?", x_assigns[1]):
+        body.append("x[1] = 1.0")
 
-            c1, c2 = st.columns(2)
-            do_local_csv = c1.button(f"Score CSV in {ENGINE_LABEL}",
-                                     use_container_width=True, disabled=(st.session_state.score_fn is None), key="btn_gh_csv")
-            do_rest_csv  = c2.button("Score CSV on Viya (REST)", use_container_width=True, key="btn_viya_csv")
+    # Dummies de select/when
+    if reason_map and sel_var:
+        for idx in sorted(reason_map):
+            body.append(f"x[{idx}] = 1.0 if {sel_var} == {reason_map[idx]} else 0.0")
 
-            if do_local_csv:
-                try:
-                    scored = score_df_local(st.session_state.score_fn, df, threshold=thr)
-                    st.success(f"Scored in {ENGINE_LABEL}: {len(scored)} rows.")
-                    st.dataframe(scored.head(50))
-                    st.download_button(
-                        f"Download {ENGINE_LABEL} CSV",
-                        data=scored.to_csv(index=False).encode("utf-8"),
-                        file_name="scored_github_python.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                        key="download_gh_csv"
-                    )
-                except Exception as e:
-                    st.error(f"{ENGINE_LABEL} batch failed: {e}")
+    # Asignaciones directas
+    for idx in sorted(x_assigns):
+        if idx == 1 and re.fullmatch(r"1(\.0+)?", x_assigns[1]): 
+            continue
+        if idx in reason_map:
+            continue
+        expr = x_assigns[idx]
+        expr = expr.strip()
+        if re.fullmatch(r"\d+(\.\d+)?", expr):
+            body.append(f"x[{idx}] = float({expr})")
+        else:
+            body.append(f"x[{idx}] = {expr}")
 
-            if do_rest_csv:
-                rows = []
-                prog = st.progress(0)
-                n = len(df)
-                for i, (_, r) in enumerate(df.iterrows(), start=1):
-                    try:
-                        resp = score_row_via_rest(r.to_dict())
-                        p, lbl = parse_mas_outputs(resp, threshold=thr)
-                    except Exception:
-                        p, lbl = float("nan"), None
-                    rec = r.to_dict()
-                    rec["prob_BAD_rest"] = p
-                    rec["label_BAD_rest"] = lbl
-                    rows.append(rec)
-                    if i % 5 == 0 or i == n:
-                        prog.progress(int(i*100/n))
-                scored_rest = pd.DataFrame(rows)
-                st.success(f"Scored on Viya: {len(scored_rest)} rows.")
-                st.dataframe(scored_rest.head(50))
-                st.download_button(
-                    "Download Viya-scored CSV",
-                    data=scored_rest.to_csv(index=False).encode("utf-8"),
-                    file_name="scored_viya.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                    key="download_viya_csv"
-                )
-        except Exception as e:
-            st.error(f"CSV error: {e}")
+    body.append(f"BETA = {beta}")
+    body.append(f"_linp_ = sum(x[i]*BETA[i] for i in range(1, {n+1}))")
+    body.append("p1 = (1.0/(1.0+math.exp(-_linp_)) if _linp_>0 else math.exp(_linp_)/(1.0+math.exp(_linp_)))")
+    body.append("return {'EM_EVENTPROBABILITY': p1}")
 
-# ---- Info ----
-with tabs[3]:
-    st.markdown("## Info")
-    sas_path = find_sas_score_file()
-    st.write("- SAS score file:", f"`{sas_path}`" if sas_path else "_not found_")
-    st.write("- Inputs from inputVar.json:", len(expected_from_json))
-    st.write("- Current expected inputs:", len(st.session_state.expected_cols))
-    if st.session_state.expected_cols:
-        with st.expander("Show expected input fields"):
-            st.code("\n".join(st.session_state.expected_cols))
-    st.write("- Sample data rows:", len(sample_df))
-    if not sample_df.empty:
-        with st.expander("Preview sample data"):
-            st.dataframe(sample_df.head(20))
-    st.caption(f"Tip: if the SAS file is DS2/ASTORE (contains scoreRecord/package), use the Viya REST tab. Otherwise, translate and score in {ENGINE_LABEL}.")
+    fn_src = "def __scorer__(**row):\n" + "\n".join("    "+ln for ln in body)
+    loc = {"math": math}
+    exec(fn_src, loc, loc)
+    scorer = loc["__scorer__"]
+
+    display_code = "def sas_score(**row):\n" + "\n".join("    "+ln for ln in body)
+    return scorer, display_code, inputs
+
+# ===== compile to callable =====
+def _pick_prob_from_env(env: dict) -> float | None:
+    for k in ("EM_EVENTPROBABILITY","EM_PREDICTION"):
+        if k in env and env[k] is not None:
+            try: return float(env[k])
+            except Exception: pass
+    p_keys = [k for k in env.keys() if k.upper().startswith("P_") and env[k] is not None]
+    if not p_keys: return None
+    def key_score(k):
+        ku = k.upper(); score = 0
+        if ku.endswith("1"): score += 3
+        if "BAD1" in ku or "EVENT" in ku: score += 2
+        if ku in ("P_BAD","P_TARGET1"): score += 1
+        return score
+    p_keys.sort(key=lambda k: (key_score(k), k), reverse=True)
+    try: return float(env[p_keys[0]])
+    except Exception: return None
+
+def compile_sas_score(sas_code: str, func_name: str = "sas_score", expected_inputs: list[str] | None = None
+                      ) -> Tuple[Callable, str, List[str]]:
+    pre = preprocess_vdmml_logit_datastep(sas_code)
+    body, discovered_inputs = translate_sas_to_python_body(pre)
+    inputs = expected_inputs or discovered_inputs or []
+
+    def _try_compile(body_code: str, inputs_list: list[str]):
+        def _score_fn(**row):
+            env = {
+                "math": math,
+                "MISSING": MISSING, "MEAN": MEAN, "SUM": SUM, "NMISS": NMISS, "COALESCE": COALESCE,
+                "_linp_": 0.0,
+                "_badval_": 0
+            }
+            for name in inputs_list: env[name] = row.get(name, None)
+            for k, v in row.items():
+                if k not in env: env[k] = v
+            exec(body_code, {}, env)
+            out = {}
+            p = _pick_prob_from_env(env)
+            if p is not None:
+                out["EM_EVENTPROBABILITY"] = p
+            for key in ("EM_CLASSIFICATION","I_BAD","I_TARGET","LABEL"):
+                if key in env and env[key] is not None:
+                    out["EM_CLASSIFICATION"] = env[key]; break
+            return out
+        return _score_fn
+
+    try:
+        # valida sintaxis rápido
+        exec(body, {}, {"math": math, "_linp_":0.0, "_badval_":0})
+        score_fn = _try_compile(body, inputs)
+        display_code = (
+            "def " + func_name + "(**row):\n"
+            "    # inputs available: " + ", ".join(inputs) + "\n"
+            "    # --- translated SAS body ---\n" +
+            "\n".join(["    " + ln for ln in body.splitlines()]) + "\n" +
+            "    # --- end translated body ---\n"
+        )
+        return score_fn, display_code, inputs
+    except Exception:
+        # fallback plano para logística
+        scorer, display_code, fb_inputs = _compile_logistic_fallback(sas_code)
+        return scorer, display_code, (expected_inputs or fb_inputs)
+
+# ===== DataFrame helper =====
+def score_dataframe(score_fn: Callable, df: pd.DataFrame, threshold: float = 0.5) -> pd.DataFrame:
+    rows = []
+    for _, r in df.iterrows():
+        out = score_fn(**r.to_dict()) or {}
+        p = out.get("EM_EVENTPROBABILITY", None)
+        # Si no hay prob (p.ej., faltantes), devolvemos NaN y etiqueta según threshold (ignorada si NaN)
+        if p is None or (isinstance(p, float) and (math.isnan(p))):
+            p = float("nan"); lab = None
+        else:
+            p = float(p)
+            lab = 1 if p >= threshold else 0
+        rec = r.to_dict()
+        rec["prob_BAD"] = p
+        rec["label_BAD"] = (int(lab) if lab is not None else None)
+        rows.append(rec)
+    return pd.DataFrame(rows)
