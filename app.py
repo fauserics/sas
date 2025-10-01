@@ -59,7 +59,6 @@ def load_input_vars() -> list[str]:
     return []
 
 def _sanitize_var(v: str) -> str:
-    # 'VAR'n -> VAR ; quitar no-alfanum (-> _)
     v = v.strip()
     m = re.match(r"^'([^']+)'\s*n$", v, flags=re.I)
     if m:
@@ -68,15 +67,11 @@ def _sanitize_var(v: str) -> str:
     return v
 
 def extract_expected_inputs_from_sas(code: str) -> list[str]:
-    # toma variables del bloque: if missing(A) or missing(B) ... then do;
     miss_names = set(_sanitize_var(x) for x in re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", code, flags=re.I))
-    # si se usan categorías REASON, agrégalo
     if re.search(r"\bREASON\b", code, flags=re.I):
         miss_names.add("REASON")
-    # filtra temporales / outputs típicos
     drop_prefixes = ("_", "EM_", "P_", "I_", "va__d__E_")
     keep = [n for n in miss_names if n and not n.upper().startswith(drop_prefixes)]
-    # orden estable
     return sorted(keep, key=str.upper)
 
 @st.cache_data
@@ -90,7 +85,7 @@ def load_sample_df(expected_cols: list[str]) -> pd.DataFrame:
                 pass
     return pd.DataFrame(columns=expected_cols)
 
-def parse_mas_outputs(resp_json: dict, threshold: float = 0.5) -> tuple[float, int]:
+def parse_mas_outputs(resp_json: dict, threshold: float = 0.5) -> tuple[float, int | None]:
     prob = None; label = None
     outputs = resp_json.get("outputs")
     if isinstance(outputs, list):
@@ -105,16 +100,17 @@ def parse_mas_outputs(resp_json: dict, threshold: float = 0.5) -> tuple[float, i
         for k in ("EM_CLASSIFICATION","I_BAD","LABEL"):
             if k in resp_json:
                 label = resp_json[k]; break
-    if prob is None:
-        prob = 0.0
     try:
-        label = int(label) if label is not None and str(label).isdigit() else (1 if float(prob) >= threshold else 0)
+        p = None if prob is None else float(prob)
     except Exception:
-        label = 1 if float(prob) >= threshold else 0
-    return float(prob), int(label)
+        p = None
+    try:
+        lbl = None if label is None else (int(label) if str(label).isdigit() else (1 if (p is not None and p >= threshold) else 0))
+    except Exception:
+        lbl = (1 if (p is not None and p >= threshold) else 0)
+    return (p if p is not None else float("nan")), lbl
 
 def build_single_record_form(fields: list[str], sample: pd.DataFrame, key_prefix: str) -> dict:
-    """Render two-column form with UNIQUE widget keys (prefix)."""
     defaults = {}
     if not sample.empty:
         for c in fields:
@@ -163,6 +159,11 @@ with st.sidebar:
     st.caption(f"MAS_MODULE_ID: {os.getenv('MAS_MODULE_ID') or '(not set)'}")
     has_token = bool(os.getenv("BEARER_TOKEN") or os.getenv("SAS_SERVICES_TOKEN") or os.getenv("VIYA_USER"))
     st.caption(f"Auth: {'configured' if has_token else 'missing'}")
+    # Opcional: recargar inputVar.json sin reiniciar
+    if st.button("Reload inputVar.json"):
+        load_input_vars.clear()
+        st.session_state.expected_cols = load_input_vars()
+        st.success("inputVar.json reloaded.")
 
 # ---------- load inputs and sample ----------
 expected_from_json = load_input_vars()
@@ -198,7 +199,6 @@ if can_translate and sas_path:
         st.warning("This SAS file looks like DS2/ASTORE (e.g., scoreRecord). Translation is not supported. Use 'Score on Viya (REST)'.")
     else:
         try:
-            # si no hay inputVar.json, inferí los inputs del bloque missing(...)
             expected_auto = extract_expected_inputs_from_sas(raw_code)
             score_fn, py_code, expected = compile_sas_score(
                 raw_code, func_name="sas_score",
@@ -243,11 +243,24 @@ with tabs[0]:
         try:
             df_in = pd.DataFrame([row]).reindex(columns=fields, fill_value=None)
             scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
-            p = float(scored["prob_BAD"].iloc[0]); lbl = int(scored["label_BAD"].iloc[0])
-            st.success(f"Scored in {ENGINE_LABEL}.")
+            # ---- SAFE CASTS (evita int(None)) ----
+            p_raw = scored["prob_BAD"].iloc[0] if "prob_BAD" in scored else float("nan")
+            lbl_raw = scored["label_BAD"].iloc[0] if "label_BAD" in scored else None
+            p = None if (pd.isna(p_raw)) else float(p_raw)
+            lbl = None
+            if lbl_raw is not None and not (isinstance(lbl_raw, float) and pd.isna(lbl_raw)):
+                try:
+                    lbl = int(lbl_raw)
+                except Exception:
+                    lbl = None
+
+            if p is None:
+                st.warning("Probability is NaN (likely missing required inputs for the SAS score). Check the form/inputVar.json.")
+            else:
+                st.success(f"Scored in {ENGINE_LABEL}.")
             c1, c2 = st.columns(2)
-            c1.metric(f"Probability of BAD ({ENGINE_LABEL})", f"{p:0.4f}")
-            c2.metric(f"Predicted label ({ENGINE_LABEL})", "1" if lbl == 1 else "0")
+            c1.metric(f"Probability of BAD ({ENGINE_LABEL})", f"{(p if p is not None else float('nan')):0.4f}" if p is not None else "—")
+            c2.metric(f"Predicted label ({ENGINE_LABEL})", "1" if lbl == 1 else ("0" if lbl == 0 else "—"))
             st.dataframe(scored)
         except Exception as e:
             st.error(f"{ENGINE_LABEL} scoring failed: {e}")
@@ -270,8 +283,8 @@ with tabs[1]:
             p, lbl = parse_mas_outputs(resp, threshold=thr)
             st.success("Viya scoring done.")
             c1, c2 = st.columns(2)
-            c1.metric("Probability of BAD (Viya)", f"{p:0.4f}")
-            c2.metric("Predicted label (Viya)", "1" if lbl == 1 else "0")
+            c1.metric("Probability of BAD (Viya)", f"{p:0.4f}" if not pd.isna(p) else "—")
+            c2.metric("Predicted label (Viya)", "1" if lbl == 1 else ("0" if lbl == 0 else "—"))
             st.json(resp)
         except Exception as e:
             st.error(f"Viya REST error: {e}")
