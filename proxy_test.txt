@@ -1,3 +1,12 @@
+# en la VM
+python3 -m venv ~/.venvs/casapp
+source ~/.venvs/casapp/bin/activate
+pip install --upgrade pip
+pip install "swat==1.6.1" "pandas==2.1.4" "requests==2.31.0" "streamlit==1.36.0"
+python -c "import swat,sys; print('SWAT OK', swat.__version__, 'en', sys.executable)"
+
+
+
 #VIYA REST
 nslookup $VIYA_URL
 nc -vz disco-a20237-rg.gelenable.sas.com 443
