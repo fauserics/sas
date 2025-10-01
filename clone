@@ -1,3 +1,6 @@
+curl -sI http://127.0.0.1:8501 | head -n1
+
+
 tmux new -s rtapp
 cd /home/cloud-user/real-time-scoring
 source ~/.venvs/casapp/bin/activate 2>/dev/null || true
