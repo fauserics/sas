@@ -1,5 +1,8 @@
 # VIYA REST
 
+ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
+    -R 80:localhost:8501 nokey@localhost.run
+
 ./cloudflared tunnel \
   --url http://127.0.0.1:8501 \
   --protocol http2 \
