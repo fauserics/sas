@@ -67,9 +67,12 @@ def _sanitize_var(v: str) -> str:
     return v
 
 def extract_expected_inputs_from_sas(code: str) -> list[str]:
+    # Detecta los requeridos del bloque missing(...)
     miss_names = set(_sanitize_var(x) for x in re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", code, flags=re.I))
+    # Si se usa REASON en select/when agregarla
     if re.search(r"\bREASON\b", code, flags=re.I):
         miss_names.add("REASON")
+    # Filtrar temporales/outputs
     drop_prefixes = ("_", "EM_", "P_", "I_", "va__d__E_")
     keep = [n for n in miss_names if n and not n.upper().startswith(drop_prefixes)]
     return sorted(keep, key=str.upper)
@@ -149,6 +152,14 @@ def is_ds2_astore(code: str) -> bool:
     sigs = ("package score", "dcl package score", "scoreRecord()", "method run()", "enddata;")
     return any(s in code for s in sigs)
 
+def list_missing(fields: list[str], row: dict) -> list[str]:
+    missing_now = []
+    for c in fields:
+        v = row.get(c, None)
+        if v is None or (isinstance(v, float) and pd.isna(v)) or (isinstance(v, str) and v.strip() == ""):
+            missing_now.append(c)
+    return missing_now
+
 # ---------- sidebar ----------
 with st.sidebar:
     st.markdown("### Settings")
@@ -159,8 +170,7 @@ with st.sidebar:
     st.caption(f"MAS_MODULE_ID: {os.getenv('MAS_MODULE_ID') or '(not set)'}")
     has_token = bool(os.getenv("BEARER_TOKEN") or os.getenv("SAS_SERVICES_TOKEN") or os.getenv("VIYA_USER"))
     st.caption(f"Auth: {'configured' if has_token else 'missing'}")
-    # Opcional: recargar inputVar.json sin reiniciar
-    if st.button("Reload inputVar.json"):
+    if st.button("Reload inputVar.json", key="reload_json_btn"):
         load_input_vars.clear()
         st.session_state.expected_cols = load_input_vars()
         st.success("inputVar.json reloaded.")
@@ -192,6 +202,7 @@ with col_t2:
     st.caption(f"Translates your SAS DATA step score code into a Python function (runs in {ENGINE_LABEL}).")
 
 sas_is_ds2 = False
+expected_auto_for_info = []
 if can_translate and sas_path:
     raw_code = load_file_text(sas_path)
     sas_is_ds2 = is_ds2_astore(raw_code)
@@ -199,14 +210,16 @@ if can_translate and sas_path:
         st.warning("This SAS file looks like DS2/ASTORE (e.g., scoreRecord). Translation is not supported. Use 'Score on Viya (REST)'.")
     else:
         try:
-            expected_auto = extract_expected_inputs_from_sas(raw_code)
+            expected_auto_for_info = extract_expected_inputs_from_sas(raw_code)
+            # Unión: JSON ∪ requeridos del SAS
+            combined_inputs = sorted(set((expected_from_json or [])) | set(expected_auto_for_info or []))
             score_fn, py_code, expected = compile_sas_score(
                 raw_code, func_name="sas_score",
-                expected_inputs=(expected_from_json or expected_auto or None)
+                expected_inputs=(combined_inputs or None)
             )
             st.session_state.score_fn = score_fn
             st.session_state.score_py = py_code
-            st.session_state.expected_cols = expected_from_json or expected_auto or expected or []
+            st.session_state.expected_cols = combined_inputs or expected or []
             st.success(f"Translation OK. Found {len(st.session_state.expected_cols)} input fields.")
         except Exception as e:
             st.error(f"Translation failed: {e}")
@@ -240,30 +253,32 @@ with tabs[0]:
                          disabled=(st.session_state.score_fn is None))
 
     if do_local:
-        try:
-            df_in = pd.DataFrame([row]).reindex(columns=fields, fill_value=None)
-            scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
-            # ---- SAFE CASTS (evita int(None)) ----
-            p_raw = scored["prob_BAD"].iloc[0] if "prob_BAD" in scored else float("nan")
-            lbl_raw = scored["label_BAD"].iloc[0] if "label_BAD" in scored else None
-            p = None if (pd.isna(p_raw)) else float(p_raw)
-            lbl = None
-            if lbl_raw is not None and not (isinstance(lbl_raw, float) and pd.isna(lbl_raw)):
-                try:
-                    lbl = int(lbl_raw)
-                except Exception:
-                    lbl = None
+        # Chequeo de faltantes
+        missing_now = list_missing(fields, row)
+        if missing_now:
+            st.error("Complete the required inputs before scoring: " + ", ".join(missing_now))
+        else:
+            try:
+                df_in = pd.DataFrame([row]).reindex(columns=fields, fill_value=None)
+                scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
+                p_raw = scored["prob_BAD"].iloc[0] if "prob_BAD" in scored else float("nan")
+                lbl_raw = scored["label_BAD"].iloc[0] if "label_BAD" in scored else None
+                p = None if (pd.isna(p_raw)) else float(p_raw)
+                lbl = None
+                if lbl_raw is not None and not (isinstance(lbl_raw, float) and pd.isna(lbl_raw)):
+                    try: lbl = int(lbl_raw)
+                    except Exception: lbl = None
 
-            if p is None:
-                st.warning("Probability is NaN (likely missing required inputs for the SAS score). Check the form/inputVar.json.")
-            else:
-                st.success(f"Scored in {ENGINE_LABEL}.")
-            c1, c2 = st.columns(2)
-            c1.metric(f"Probability of BAD ({ENGINE_LABEL})", f"{(p if p is not None else float('nan')):0.4f}" if p is not None else "—")
-            c2.metric(f"Predicted label ({ENGINE_LABEL})", "1" if lbl == 1 else ("0" if lbl == 0 else "—"))
-            st.dataframe(scored)
-        except Exception as e:
-            st.error(f"{ENGINE_LABEL} scoring failed: {e}")
+                if p is None:
+                    st.warning("Probability is NaN (likely missing required inputs for the SAS score). Check the form/inputVar.json.")
+                else:
+                    st.success(f"Scored in {ENGINE_LABEL}.")
+                c1, c2 = st.columns(2)
+                c1.metric(f"Probability of BAD ({ENGINE_LABEL})", f"{(p if p is not None else float('nan')):0.4f}" if p is not None else "—")
+                c2.metric(f"Predicted label ({ENGINE_LABEL})", "1" if lbl == 1 else ("0" if lbl == 0 else "—"))
+                st.dataframe(scored)
+            except Exception as e:
+                st.error(f"{ENGINE_LABEL} scoring failed: {e}")
 
 # ---- Single case — Viya (REST) ----
 with tabs[1]:
@@ -277,17 +292,22 @@ with tabs[1]:
     do_rest  = st.button("Score on Viya (REST)", use_container_width=True, key="btn_viya_single")
 
     if do_rest:
-        try:
-            with st.spinner("Calling Viya..."):
-                resp = score_row_via_rest(row_rest)
-            p, lbl = parse_mas_outputs(resp, threshold=thr)
-            st.success("Viya scoring done.")
-            c1, c2 = st.columns(2)
-            c1.metric("Probability of BAD (Viya)", f"{p:0.4f}" if not pd.isna(p) else "—")
-            c2.metric("Predicted label (Viya)", "1" if lbl == 1 else ("0" if lbl == 0 else "—"))
-            st.json(resp)
-        except Exception as e:
-            st.error(f"Viya REST error: {e}")
+        # Chequeo de faltantes (opcional, para consistencia)
+        missing_now = list_missing(fields, row_rest)
+        if missing_now:
+            st.error("Complete the required inputs before scoring: " + ", ".join(missing_now))
+        else:
+            try:
+                with st.spinner("Calling Viya..."):
+                    resp = score_row_via_rest(row_rest)
+                p, lbl = parse_mas_outputs(resp, threshold=thr)
+                st.success("Viya scoring done.")
+                c1, c2 = st.columns(2)
+                c1.metric("Probability of BAD (Viya)", f"{p:0.4f}" if not pd.isna(p) else "—")
+                c2.metric("Predicted label (Viya)", "1" if lbl == 1 else ("0" if lbl == 0 else "—"))
+                st.json(resp)
+            except Exception as e:
+                st.error(f"Viya REST error: {e}")
 
 # ---- CSV batch ----
 with tabs[2]:
@@ -308,6 +328,7 @@ with tabs[2]:
             do_rest_csv  = c2.button("Score CSV on Viya (REST)", use_container_width=True, key="btn_viya_csv")
 
             if do_local_csv:
+                # Chequeo simple: columnas presentes (valores faltantes se permiten en batch)
                 try:
                     scored = score_df_local(st.session_state.score_fn, df, threshold=thr)
                     st.success(f"Scored in {ENGINE_LABEL}: {len(scored)} rows.")
@@ -359,7 +380,10 @@ with tabs[3]:
     sas_path = find_sas_score_file()
     st.write("- SAS score file:", f"`{sas_path}`" if sas_path else "_not found_")
     st.write("- Inputs from inputVar.json:", len(expected_from_json))
-    st.write("- Current expected inputs:", len(st.session_state.expected_cols))
+    if expected_auto_for_info:
+        with st.expander("Inputs detected from SAS (missing(...))"):
+            st.code("\n".join(expected_auto_for_info))
+    st.write("- Current expected inputs (union JSON ∪ SAS):", len(st.session_state.expected_cols))
     if st.session_state.expected_cols:
         with st.expander("Show expected input fields"):
             st.code("\n".join(st.session_state.expected_cols))
