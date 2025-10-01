@@ -1,3 +1,8 @@
+curl -s -m 5 -H "Authorization: Bearer $SAS_SERVICES_TOKEN" \
+  "https://$CAS_HOST/microanalyticScore/modules?limit=1" \
+  -w "\nHTTP %{http_code}\n"
+
+
 export CAS_HOST="$(printf '%s' "${VIYA_URL:-disco-a20237-rg.gelenable.sas.com}" | sed -E 's#^https?://##; s#/.*$##')"
 echo "CAS_HOST=$CAS_HOST"
 
