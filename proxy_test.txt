@@ -1,3 +1,12 @@
+# en la VM (ejemplo con password grant; usa tu flujo real)
+TOKEN=$(curl -s -u sas.ec: \
+  -d "grant_type=password&username=$VIYA_USER&password=$VIYA_PASSWORD" \
+  "$VIYA_URL/SASLogon/oauth/token" | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+echo "$TOKEN"
+
+
+
+
 # 1) Entrá a la carpeta del proyecto
 cd /home/cloud-user/real-time-scoring
 
