@@ -1,5 +1,8 @@
 #VIYA SWAT
 
+python3 -c "import streamlit,sys; print('streamlit en:', streamlit.__file__); print('python:', sys.executable)"
+
+
 python3 - <<'PY'
 import os, sys
 try:
