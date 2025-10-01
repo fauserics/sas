@@ -477,8 +477,7 @@ if can_translate and sas_path:
         expected_auto = extract_expected_inputs_from_sas(raw_code)
         st.session_state.cat_levels = parse_categorical_levels_from_sas(raw_code)
         st.session_state.cat_levels_ci = build_cat_levels_ci(st.session_state.cat_levels)
-        # ---- FIX: forzar set en ambos lados antes del operador | ----
-        combined_inputs = sorted(set(expected_from_json or []) | set(expected_auto or []))
+        combined_inputs = sorted(set(expected_from_json or []) | set(expected_auto or []))  # FIX
         combined_inputs = [c for c in combined_inputs if c.upper() != "BAD"]
         score_fn, py_code, expected = compile_sas_score(
             raw_code, func_name="sas_score",
@@ -592,16 +591,32 @@ with tabs[1]:
 
     st.markdown("## 3) Score on Viya (REST)")
 
-    # --- PRE-FLIGHT (solo si Debug ON) ---
+    # --- PRE-FLIGHT EXTENDIDO (solo si Debug ON) ---
     if st.session_state.get("debug"):
         import os as _os, socket as _socket, requests as _requests
-        st.caption("Debug — Viya preflight")
+        st.caption("Debug — Viya preflight (extended)")
         try:
             _host = _os.getenv("VIYA_URL","").split("://")[-1].split("/")[0]
             _dns = _socket.getaddrinfo(_host, 443)
             st.write("DNS OK →", _dns[:1])
         except Exception as _ex:
             st.error(f"DNS failed: {_ex}")
+        try:
+            st.write("TCP connect test to 443 (2s)…")
+            _s = _socket.create_connection((_host, 443), timeout=2.0)
+            _s.close()
+            st.success("TCP 443 reachable (raw socket).")
+        except Exception as _ex:
+            st.error(f"TCP 443 connect failed: {_ex}")
+        try:
+            _ip = _requests.get("https://api.ipify.org", timeout=5).text.strip()
+            st.write("Public egress IP:", _ip)
+        except Exception:
+            try:
+                _ip = _requests.get("https://ifconfig.me/ip", timeout=5).text.strip()
+                st.write("Public egress IP (alt):", _ip)
+            except Exception as _ex:
+                st.warning(f"No pude obtener IP saliente: {_ex}")
         try:
             _url = _os.getenv("VIYA_URL","").rstrip("/") + "/SASLogon/login"
             _r = _requests.get(
