@@ -1,5 +1,19 @@
 #VIYA SWAT
 
+# 1) Capturo el Python que usa "python3"
+PY=$(python3 -c 'import sys; print(sys.executable)'); echo "Usando Python: $PY"
+
+# 2) ¿SWAT está instalado en ESE Python?
+"$PY" -c "import swat,sys; print('SWAT OK', swat.__version__, 'en', sys.executable)" \
+  || "$PY" -m pip install "swat==1.6.1"
+
+# 3) Si falta Streamlit en ese mismo Python, lo instalo (no hace daño si ya está)
+"$PY" -m pip install "streamlit==1.36.0" "pandas==2.1.4" "requests==2.31.0" -q
+
+# 4) Lanzo la app con ese mismo Python (clave)
+"$PY" -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501
+
+
 python3 -c "import streamlit,sys; print('streamlit en:', streamlit.__file__); print('python:', sys.executable)"
 
 
