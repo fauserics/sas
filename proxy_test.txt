@@ -1,5 +1,13 @@
 # VIYA REST
 
+./cloudflared tunnel \
+  --url http://127.0.0.1:8501 \
+  --protocol http2 \
+  --edge-ip-version 4 \
+  --no-autoupdate \
+  --loglevel info
+
+
 # 1) Descargar binario (x86_64); no requiere root
 curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
 chmod +x cloudflared
