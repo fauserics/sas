@@ -1,7 +1,7 @@
 # app.py
 # Real Time Scoring App (powered by SAS)
 
-import os, re, json, math, traceback
+import os, re, json, math, traceback, random
 import pandas as pd
 import streamlit as st
 from io import StringIO
@@ -44,7 +44,6 @@ def _to_num(x):
         return 0.0
 
 def _discover_levels_and_x(sas_code):
-    # busca array beta
     m = re.search(r"array\s+_beta_[A-Za-z0-9_]+\s*\[\s*(\d+)\s*\]\s*_temporary_\s*\((.*?)\)\s*;", sas_code, flags=re.I|re.S)
     if not m:
         raise RuntimeError("No beta array found in SAS code.")
@@ -54,12 +53,10 @@ def _discover_levels_and_x(sas_code):
         raise RuntimeError("Beta length mismatch.")
     beta = [None] + [float(t) for t in toks]
 
-    # xrow assignments
     x_assigns = {}
     for i_str, expr in re.findall(r"_xrow_[A-Za-z0-9_]+\s*\[\s*(\d+)\s*\]\s*=\s*([^;]+);", sas_code, flags=re.I):
         x_assigns[int(i_str)] = expr.strip()
 
-    # select/when para REASON
     reason_map = {}
     sel_var = None
     sel = re.search(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;(.+?)end\s*;", sas_code, flags=re.I|re.S)
@@ -71,11 +68,9 @@ def _discover_levels_and_x(sas_code):
             if mset:
                 reason_map[int(mset.group(1))] = cond.strip()
 
-    # si no detectó var select, inferir
     if not sel_var:
         sel_var = "_REASON_" if re.search(r"\b_REASO[N_]\b", sas_code, flags=re.I) else ("REASON" if re.search(r"\bREASON\b", sas_code, flags=re.I) else "_REASON_")
 
-    # expected inputs (missing(...)) sin BAD
     miss = set()
     for v in re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", sas_code, flags=re.I):
         v = re.sub(r"^'([^']+)'\s*n$", r"\1", v)
@@ -89,8 +84,6 @@ def _discover_levels_and_x(sas_code):
 def _compile_logit_fallback_inline(sas_code, expected_inputs=None):
     beta, x_assigns, reason_map, sel_var, miss = _discover_levels_and_x(sas_code)
     n = len(beta) - 1
-
-    # inputs = unión con expected_inputs
     inputs = sorted(set(miss) | set(expected_inputs or []))
 
     body = []
@@ -99,16 +92,13 @@ def _compile_logit_fallback_inline(sas_code, expected_inputs=None):
     body.append("_temp_ = 1.0")
     body.append(f"x = [0.0]*({n+1})")
 
-    # intercepto si corresponde
     if 1 in x_assigns and re.fullmatch(r"1(\.0+)?", x_assigns[1]):
         body.append("x[1] = 1.0")
 
-    # dummies de REASON
     if reason_map and sel_var:
         for idx in sorted(reason_map):
             body.append(f"x[{idx}] = 1.0 if {sel_var} == {reason_map[idx]} else 0.0")
 
-    # resto de columnas
     for idx in sorted(x_assigns):
         if idx == 1 and re.fullmatch(r"1(\.0+)?", x_assigns[1]):
             continue
@@ -361,6 +351,14 @@ with st.sidebar:
     st.markdown("### Settings")
     thr = st.slider("Decision threshold (BAD=1)", 0.0, 1.0, 0.50, 0.01)
     debug = st.toggle("Debug mode", value=False)
+    # Modo de variedad del assistant
+    asst_mode = st.selectbox(
+        "Assistant variety",
+        ["deterministic", "random", "random (no repeat)"],
+        index=1
+    )
+    st.session_state["asst_mode"] = asst_mode
+
     st.markdown("---")
     st.markdown("**Viya REST env**")
     st.caption(f"VIYA_URL: {os.getenv('VIYA_URL') or '(not set)'}")
@@ -465,7 +463,7 @@ with st.expander("Show generated Python score code", expanded=False):
         st.info("Translate first to view the generated code.")
 
 # =========================
-# Tabs (agregamos Assistant conservando todo lo previo)
+# Tabs (con Assistant)
 # =========================
 tabs = st.tabs([f"Single case — {ENGINE_LABEL}", "Single case — Viya (REST)", "CSV batch", "Assistant", "Info"])
 
@@ -670,23 +668,19 @@ with tabs[3]:
     st.markdown("## Conversational Assistant (English)")
     st.caption("Enter customer attributes and pick the scoring engine. The assistant will suggest an empathetic response based on the predicted risk.")
 
-    # Engine selector
     eng = st.radio("Engine", [ENGINE_LABEL, "Viya (REST)"], horizontal=True, key="asst_engine")
 
-    # Form for inputs (reuses detected schema)
     fields = st.session_state.expected_cols or list(sample_df.columns)
     if not fields:
         st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
     row_asst = build_single_record_form(fields, sample_df, st.session_state.cat_levels_ci, key_prefix="assistant_single")
 
     def _score_one(row_dict):
-        # common validation
         copy_aliases_inplace_ci(row_dict, st.session_state.cat_levels_ci)
         missing_now = list_missing(fields, row_dict)
         if missing_now:
             return None, f"Missing required inputs: {', '.join(missing_now)}"
 
-        # Build DataFrame row with alias columns too (for local scorer)
         fields_full = list(fields)
         names = set(st.session_state.cat_levels_ci.keys()) | {f'_{f}' for f in FORCE_CAT} | set(FORCE_CAT)
         for nm in names:
@@ -701,7 +695,6 @@ with tabs[3]:
             if col.lower() not in cat_fields_ci:
                 df_in[col] = pd.to_numeric(df_in[col], errors="coerce").fillna(0.0)
 
-        # score
         if eng == ENGINE_LABEL:
             if st.session_state.score_fn is None:
                 return None, "Translate SAS → Python first in step 1."
@@ -723,47 +716,122 @@ with tabs[3]:
             except Exception as e:
                 return None, f"Viya REST error: {e}"
 
-    def _compose_empatic_response(prob, threshold):
-        # Heurística simple para 3-4 bandas
-        if prob is None or not (isinstance(prob, (int, float))) or pd.isna(prob):
-            tone = "technical"
-            msg = (
-                "We couldn't compute a reliable probability at this time. "
-                "Could you please confirm a few details (e.g., Reason, Loan amount, and Employment years)? "
-                "I'll recheck immediately."
-            )
-            return tone, msg
+    def _compose_empatic_response(prob, threshold, row=None):
+        """
+        Varía el mensaje por bandas y elige template:
+          - deterministic: rotación
+          - random: elección al azar
+          - random (no repeat): azar evitando repetir el último índice por banda
+        """
+        row = row or {}
+        reason = (row.get("REASON") or row.get("_REASON_") or "").strip()
+        loan = row.get("LOAN")
+        amount_txt = ""
+        try:
+            if loan is not None and str(loan).strip() != "":
+                amount_txt = f" of {int(float(loan)):,}"
+        except Exception:
+            amount_txt = ""
+        reason_txt = f" for **{reason}**" if reason else ""
 
-        if prob < threshold * 0.6:
-            tone = "approve_low"
-            msg = (
-                "Thanks for your patience! Based on your profile, you’re **well positioned** for approval. "
-                "I can proceed with the application and outline the next steps, including document upload and a quick identity check. "
-                "Would you like me to continue?"
-            )
-        elif prob < threshold:
-            tone = "approve_borderline"
-            msg = (
-                "Thanks for sharing those details. You’re **close to our approval threshold**. "
-                "I can submit your application as is, or, if you’d prefer, we can strengthen it by adjusting the amount or providing "
-                "additional supporting documents (for example, proof of income or references). Which option works best for you?"
-            )
-        elif prob < min(0.85, threshold + 0.2):
-            tone = "cautionary"
-            msg = (
-                "I understand this is important. At the moment, your profile suggests **a higher risk level**. "
-                "We can still explore alternatives: a smaller amount, a longer term, or additional guarantor information. "
-                "Would you like to try one of these options together?"
-            )
+        if prob is None or (isinstance(prob, float) and (prob != prob)):
+            band = "unknown"
         else:
-            tone = "decline_empatic"
-            msg = (
-                "Thank you for your time. I know this isn’t the outcome you hoped for. "
-                "Right now we’re **unable to proceed** based on our criteria. "
-                "If you’d like, I can share **practical next steps**—for example, steps to improve your credit profile and when to reapply. "
-                "Would that be helpful?"
-            )
-        return tone, msg
+            p = float(prob)
+            if p < threshold * 0.6:
+                band = "very_low"
+            elif p < threshold:
+                band = "near_low"
+            elif p < min(0.85, threshold + 0.2):
+                band = "elevated"
+            else:
+                band = "very_high"
+
+        TEMPLATES = {
+            "unknown": [
+                ("technical",
+                 "I couldn’t compute a reliable probability right now. Could you confirm a few details "
+                 "(for example, Reason{amt} and Employment years)? I’ll recheck immediately.".replace("{amt}", amount_txt)),
+                ("technical",
+                 "I’m missing a couple of fields to score this case{amt}. If you can confirm them (e.g., Reason and LOAN), "
+                 "I’ll run the evaluation again right away.".replace("{amt}", amount_txt)),
+                ("technical",
+                 "Something seems off with the inputs{amt}. Please confirm the key values (like Reason and income/tenure) and I’ll try again."
+                 .replace("{amt}", amount_txt)),
+            ],
+            "very_low": [
+                ("approve_low",
+                 "Thanks for the details! Based on your profile{reason}, you look **well positioned** for approval. "
+                 "I can proceed with the application and outline the next steps (document upload and a quick ID check). "
+                 "Shall I continue?"),
+                ("approve_low",
+                 "Good news — your current profile{reason} indicates **low risk**. "
+                 "I can move forward and share the next steps for a smooth approval. Would you like me to proceed?"),
+                ("approve_low",
+                 "Everything looks solid{reason}. You’re **in great shape** for approval. "
+                 "I can continue with the application flow and timing. Is that okay with you?"),
+            ],
+            "near_low": [
+                ("approve_borderline",
+                 "Thanks for sharing those details. You’re **close to our approval threshold**. "
+                 "We can submit as is, or strengthen the case (smaller amount{amt}, extra documents). Which do you prefer?"),
+                ("approve_borderline",
+                 "You’re near the line for approval. We can go ahead now, or improve the application "
+                 "by adjusting the requested amount{amt} or adding supporting docs. What works best?"),
+                ("approve_borderline",
+                 "You’re almost there. If you’d like, we can optimize the request (e.g., tweak the amount{amt} or add proof of income). "
+                 "Shall we try that?"),
+            ],
+            "elevated": [
+                ("cautionary",
+                 "I understand this is important. Right now your profile suggests **higher risk**. "
+                 "We can still explore alternatives: a smaller amount{amt}, a longer term, or a guarantor. Would you like to try one together?"),
+                ("cautionary",
+                 "At the moment, your risk score is above our comfort zone. "
+                 "We could reduce the requested amount{amt} or provide additional backing (docs/guarantor). Should we explore these options?"),
+                ("cautionary",
+                 "Your case is currently above our standard risk threshold. "
+                 "We can adjust conditions (e.g., lower amount{amt}) to improve your chances. Interested?"),
+            ],
+            "very_high": [
+                ("decline_empatic",
+                 "Thank you for your time. I know this isn’t the outcome you hoped for. "
+                 "Right now we’re **unable to proceed** based on our criteria. "
+                 "If you’d like, I can share **practical next steps** to strengthen your profile and when to reapply."),
+                ("decline_empatic",
+                 "I appreciate your patience. At this stage, we’re **not able to continue** under current policies. "
+                 "I can provide concrete suggestions to improve your eligibility and a realistic timeline to try again."),
+                ("decline_empatic",
+                 "I understand this is disappointing. We’re **unable to move forward** today. "
+                 "Would guidance on improving your credit profile and reapplication timing be helpful?"),
+            ],
+        }
+
+        def personalize(txt: str) -> str:
+            return txt.replace("{reason}", reason_txt).replace("{amt}", amount_txt)
+
+        opts = TEMPLATES[band]
+        mode = st.session_state.get("asst_mode", "random")
+
+        if mode == "deterministic":
+            key = f"tmpl_idx_{band}"
+            idx = st.session_state.get(key, 0) % len(opts)
+            st.session_state[key] = idx + 1
+        elif mode == "random (no repeat)":
+            last_key = f"last_idx_{band}"
+            last = st.session_state.get(last_key, None)
+            idx = random.randrange(len(opts))
+            if last is not None and len(opts) > 1:
+                tries = 0
+                while idx == last and tries < 5:
+                    idx = random.randrange(len(opts))
+                    tries += 1
+            st.session_state[last_key] = idx
+        else:  # "random"
+            idx = random.randrange(len(opts))
+
+        tone, base_txt = opts[idx]
+        return tone, personalize(base_txt)
 
     st.markdown("### Run assistant")
     if st.button("Get suggested reply", type="primary", use_container_width=True, key="assistant_btn"):
@@ -772,7 +840,7 @@ with tabs[3]:
         if err:
             st.chat_message("assistant").markdown(f"**Issue:** {err}")
         else:
-            tone, reply = _compose_empatic_response(prob, thr)
+            tone, reply = _compose_empatic_response(prob, thr, row_asst)
             pretty_p = "—" if prob is None or pd.isna(prob) else f"{prob:0.4f}"
             st.chat_message("assistant").markdown(
                 f"**Predicted probability (BAD):** {pretty_p}\n\n"
