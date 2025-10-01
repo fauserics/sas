@@ -1,3 +1,25 @@
+source ~/.venvs/casapp/bin/activate || (python3 -m venv ~/.venvs/casapp && source ~/.venvs/casapp/bin/activate)
+pip install --upgrade pip
+pip install "streamlit==1.36.0" "pandas==2.1.4" "requests==2.31.0"
+# (si usás el tab CAS y lo tenés configurado): pip install "swat==1.6.1"
+
+# si guardaste el token:
+export BEARER_TOKEN="$(cat ~/.viya/token.txt)"
+
+# lanzar (desde la VM)
+BEARER_TOKEN="$BEARER_TOKEN" \
+VIYA_URL="https://disco-a20237-rg.gelenable.sas.com" \
+MAS_MODULE_ID="gradient_boosting__interactive-m" \
+NO_PROXY="disco-a20237-rg.gelenable.sas.com,.gelenable.sas.com,localhost,127.0.0.1" \
+HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy= \
+python -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+
+
+
+
+
+
+
 # Cliente MAS: crear SOLO si no existe
 [ -f viya_mas_client.py ] || cat > viya_mas_client.py <<'PY'
 import os, requests
