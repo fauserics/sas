@@ -34,7 +34,6 @@ def _as_set(x):
     if isinstance(x, set):
         return x
     if isinstance(x, dict):
-        # a veces vienen como {"levels":[...]} o dict raro
         if "levels" in x and isinstance(x["levels"], (list, set, tuple)):
             return set(x["levels"])
         return set(x.keys())
@@ -48,14 +47,12 @@ def _merge_levels(a, b):
 # ============================================================
 # Optional imports with graceful fallback
 # ============================================================
-# SAS score translator (local Python scoring)
 try:
     import sas_code_translator as sct
 except Exception as e:
     sct = None
     st.warning(f"Translator module not found/failed to import: {e}")
 
-# Viya MAS client (REST scoring)
 try:
     from viya_mas_client import score_row_via_rest, get_module_inputs, sync_input_schema_to_file
 except Exception as e:
@@ -64,7 +61,6 @@ except Exception as e:
     sync_input_schema_to_file = None
     st.warning(f"Viya client not found/failed to import: {e}")
 
-# Optional LLM assistant
 try:
     from llm.assistant import suggest_message, refine_with_llm
 except Exception:
@@ -91,7 +87,7 @@ def load_input_vars(path: str = "score/inputVar.json") -> List[Dict[str, Any]]:
             return fields
         except Exception as e:
             st.error(f"Failed to read score/inputVar.json: {e}")
-    # Default (minimal) if file missing:
+    # Default minimal schema
     return [
         {"name":"REASON","type":"cat","levels":["DebtCon","HomeImp"]},
         {"name":"CLAGE","type":"num"},
@@ -108,7 +104,6 @@ def load_input_vars(path: str = "score/inputVar.json") -> List[Dict[str, Any]]:
 
 FIELDS = load_input_vars()
 
-# Keep UI category overrides in session
 if "ui_categories" not in st.session_state:
     st.session_state["ui_categories"] = {f["name"]: f.get("levels") for f in FIELDS if f.get("levels")}
 if "score_fn" not in st.session_state:
@@ -123,13 +118,8 @@ if "last_prob" not in st.session_state:
 # ============================================================
 def build_single_record_form(fields: List[Dict[str, Any]], sample: Optional[pd.DataFrame]=None,
                              key_prefix: str = "form") -> Dict[str, Any]:
-    """
-    Build a single-record input form. Uses st.session_state['ui_categories'] to decide categorical options.
-    key_prefix ensures unique widget keys across tabs/forms.
-    """
     ui_cats = st.session_state.get("ui_categories") or {}
     row: Dict[str, Any] = {}
-    # layout in 2 columns
     cols = st.columns(2)
     col_idx = 0
 
@@ -140,15 +130,12 @@ def build_single_record_form(fields: List[Dict[str, Any]], sample: Optional[pd.D
         tgt = cols[col_idx % 2]
         col_idx += 1
 
-        # Infer default value from sample (if provided)
         default_val = None
         if sample is not None and c in sample.columns and len(sample) > 0:
             default_val = sample.iloc[0][c]
 
         if cat_levels:
-            # categorical
             options = list(cat_levels)
-            # ensure safe default
             def_index = 0
             if default_val in options:
                 def_index = options.index(default_val)
@@ -156,7 +143,6 @@ def build_single_record_form(fields: List[Dict[str, Any]], sample: Optional[pd.D
                 c, options, index=def_index, key=f"{key_prefix}_sel_{c}"
             )
         else:
-            # numeric/text → assume float unless told otherwise
             try:
                 start_val = float(default_val) if default_val is not None and str(default_val) != "" else 0.0
             except Exception:
@@ -170,7 +156,6 @@ def build_single_record_form(fields: List[Dict[str, Any]], sample: Optional[pd.D
 # Scoring helpers
 # ============================================================
 def score_local_python(row: Dict[str, Any], threshold: float = 0.5) -> Dict[str, Any]:
-    """Score using the local Python-translated function (if available)."""
     if sct is None or st.session_state.get("score_fn") is None:
         raise RuntimeError("No local Python score function available. Translate SAS → Python first.")
     df = pd.DataFrame([row])
@@ -183,16 +168,13 @@ def score_via_viya(row: Dict[str, Any]) -> Dict[str, Any]:
     if score_row_via_rest is None:
         raise RuntimeError("Viya client not available.")
     resp = score_row_via_rest(row)
-    # Try common keys
     outputs = {}
     try:
-        # MAS returns {"outputs":[{"name":"...","value":...},...]}
         outs = resp.get("outputs") or []
         for item in outs:
             outputs[item.get("name")] = item.get("value")
     except Exception:
         pass
-    # Heuristic for probability keys
     prob = None
     for k in ("EM_EVENTPROBABILITY","P_BAD","P_TARGET1","P_bad1","P_va__d__E_JOB1","Probability"):
         if k in outputs and outputs[k] not in (None, ""):
@@ -242,9 +224,9 @@ with tab2:
             try:
                 names = sync_input_schema_to_file(module_id=os.getenv("MAS_MODULE_ID"))
                 st.success(f"Synchronized inputVar.json from MAS: {', '.join(names)}")
-                # reload fields and categories
-                global FIELDS
-                FIELDS = load_input_vars()
+                # reload fields and categories (in-place, sin global)
+                new_fields = load_input_vars()
+                FIELDS[:] = new_fields
                 st.session_state["ui_categories"] = {f["name"]: f.get("levels") for f in FIELDS if f.get("levels")}
             except Exception as e:
                 st.error(f"Sync failed: {e}")
@@ -288,7 +270,6 @@ with tab3:
                         st.success("Batch scored with GitHub (Python).")
                         st.dataframe(df_out)
                 else:
-                    # Viya REST (row-wise)
                     if score_row_via_rest is None:
                         st.error("Viya client not available.")
                     else:
@@ -323,7 +304,6 @@ with tab4:
                 st.session_state["score_fn"] = res.get("score_fn")
                 st.session_state["default_prob"] = res.get("default_prob")
 
-                # Merge categories from form schema and parsed categories (SAFE union)
                 parsed_cats = res.get("categories", {}) or {}
                 form_levels = {f["name"]: f.get("levels") for f in FIELDS if f.get("levels")}
                 all_vars = set(form_levels.keys()) | set(parsed_cats.keys())
@@ -331,7 +311,6 @@ with tab4:
                     v: _merge_levels(form_levels.get(v), parsed_cats.get(v))
                     for v in all_vars
                 }
-                # Keep also any existing ui_categories for other fields
                 for k, old in (st.session_state.get("ui_categories") or {}).items():
                     if k not in ui_categories:
                         ui_categories[k] = old
@@ -357,16 +336,13 @@ with tab5:
     engine = st.selectbox("Score source", ["Last result (any)", "GitHub (Python)", "Viya (REST)"], key="as_engine")
     mode = st.selectbox("Response mode", ["Institutional (deterministic)", "Institutional + LLM (adaptive)"], key="as_mode")
 
-    # Get probability for this session
     prob = st.session_state.get("last_prob")
     row_for_msg = st.session_state.get("last_row") or {}
 
-    # Allow manual override if none
     if prob is None or pd.isna(prob):
         st.info("No probability in session. Enter a probability manually or score a case first.")
         prob = st.number_input("Manual probability (0..1)", min_value=0.0, max_value=1.0, value=0.5, step=0.01, key="as_prob_manual")
 
-    # Base institutional suggestion
     def _institutional(prob_: float) -> str:
         if prob_ >= 0.8:
             return ("We appreciate your interest. Based on our assessment, your application currently does not meet our "
@@ -389,7 +365,6 @@ with tab5:
         if refine_with_llm is None:
             st.warning("LLM refinement not available (assistant module not found).")
         else:
-            # Provide context to LLM
             ctx = {
                 "probability": float(prob),
                 "inputs": row_for_msg
