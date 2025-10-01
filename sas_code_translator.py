@@ -2,7 +2,7 @@
 # Translate SAS DATA step scoring code -> Python function.
 # Includes preprocessing for typical VDMML Logistic code patterns.
 
-import re, math, types
+import re, math
 import pandas as pd
 from typing import Callable, List, Tuple
 
@@ -85,31 +85,40 @@ def _arrays_to_python_lists(txt: str) -> str:
     for line in txt.splitlines():
         m = re.match(r"\s*array\s+([A-Za-z_]\w*)\s*\{\s*(\d+)\s*\}\s*_temporary_\s*\((.*?)\)\s*;", line, flags=re.I|re.S)
         if m:
-            name, n, vals = m.group(1), int(m.group(2)), m.group(3)
-            vals_str = vals.strip()
-            py = f"{name} = [None] + [{vals_str}]"
-            out_lines.append(py)
+            name, n, vals = m.group(1), int(m.group(2)), m.group(3).strip()
+            out_lines.append(f"{name} = [None] + [{vals}]")
             continue
         m2 = re.match(r"\s*array\s+([A-Za-z_]\w*)\s*\{\s*(\d+)\s*\}\s*_temporary_\s*;", line, flags=re.I)
         if m2:
             name, n = m2.group(1), int(m2.group(2))
-            py = f"{name} = [0.0] * ({n}+1)"
-            out_lines.append(py)
+            out_lines.append(f"{name} = [0.0] * ({n}+1)")
             continue
-        # dot-product loop -> UNA SOLA LÍNEA: sin indent interno
+        # dot-product loop -> single line (no inner indent)
         m3 = re.match(
             r"\s*do\s+([A-Za-z_]\w*)\s*=\s*1\s*to\s*(\d+)\s*;\s*_linp_\s*\+\s*([A-Za-z_]\w*)\s*\{\s*_\1_\s*\}\s*\*\s*([A-Za-z_]\w*)\s*\{\s*_\1_\s*\}\s*;\s*end\s*;",
             line, flags=re.I
         )
         if m3:
             it, n, a1, a2 = m3.group(1), int(m3.group(2)), m3.group(3), m3.group(4)
-            py = f"_linp_ = _linp_ + (sum({a1}[i] * {a2}[i] for i in range(1, {n}+1)) if _badval_ == 0 else 0.0)"
-            out_lines.append(py)
+            out_lines.append(f"_linp_ = _linp_ + (sum({a1}[i] * {a2}[i] for i in range(1, {n}+1)) if _badval_ == 0 else 0.0)")
             continue
         out_lines.append(line)
     return "\n".join(out_lines)
 
 def _select_when_to_if(txt: str) -> str:
+    """
+    Convierte:
+      select (X);
+        when ('A') stmtA;
+        when ('B') stmtB;
+        otherwise stmtO;
+      end;
+    en una secuencia SAS-like sin colons:
+      if X = 'A' then do; stmtA; end;
+      if X = 'B' then do; stmtB; end;
+      if not (X = 'A' or X = 'B') then do; stmtO; end;
+    Esto evita generar 'if ... :' (Python) que rompía la indentación.
+    """
     lines = _split_statements(txt)
     res, i = [], 0
     while i < len(lines):
@@ -117,25 +126,42 @@ def _select_when_to_if(txt: str) -> str:
         msel = re.match(r"^select\s*\((.+)\)$", s, flags=re.I)
         if not msel:
             res.append(lines[i]); i += 1; continue
-        sel_expr = msel.group(1).strip()
-        i += 1; first = True
+        sel = msel.group(1).strip()
+        i += 1
+        whens = []
+        otherwise_stmt = None
         while i < len(lines):
             w = lines[i].strip()
             if re.match(r"^end$", w, flags=re.I):
-                i += 1; break
+                i += 1
+                break
             mwhen = re.match(r"^when\s*\((.+)\)\s*(.+)$", w, flags=re.I)
             moth  = re.match(r"^otherwise\s*(.+)$", w, flags=re.I)
             if mwhen:
                 cond = mwhen.group(1).strip()
                 stmt = mwhen.group(2).strip()
-                res.append((("if " if first else "elif ") + f"{sel_expr} == {cond}:"))
-                res.append("    " + stmt)
-                first = False; i += 1; continue
+                whens.append((cond, stmt))
+                i += 1
+                continue
             if moth:
-                stmt = moth.group(1).strip()
-                res.append("else:"); res.append("    " + stmt)
-                i += 1; continue
-            res.append("    " + lines[i]); i += 1
+                otherwise_stmt = moth.group(1).strip()
+                i += 1
+                continue
+            # cualquier otra línea dentro: la anexamos tal cual
+            res.append(lines[i]); i += 1
+
+        # emitir ifs SAS-like
+        seen_conds = []
+        for cond, stmt in whens:
+            res.append(f"if {sel} = {cond} then do")
+            res.append(stmt)
+            res.append("end")
+            seen_conds.append(f"{sel} = {cond}")
+        if otherwise_stmt is not None:
+            neg = " or ".join(seen_conds) if seen_conds else "0"
+            res.append(f"if not ({neg}) then do")
+            res.append(otherwise_stmt)
+            res.append("end")
         continue
     return ";\n".join(res)
 
@@ -199,6 +225,7 @@ def translate_sas_to_python_body(sas_code: str) -> Tuple[str, List[str]]:
                 } and tok.upper() not in created:
                     inputs.add(tok)
             continue
+        # cualquier otra sentencia "plana"
         py_lines.append("    "*indent + st)
 
     body = "\n".join(py_lines) if py_lines else "pass"
