@@ -1,3 +1,8 @@
+curl -sSf http://127.0.0.1:8501/healthz && echo "UI OK" || echo "UI NO RESPONDE"
+
+
+
+
 cd /home/cloud-user/real-time-scoring
 source ~/.venvs/casapp/bin/activate 2>/dev/null || true
 
