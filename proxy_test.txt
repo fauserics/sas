@@ -1,4 +1,10 @@
 # en la VM# A) DNS (3s)
+# Ver VIYA_URL y extraer el host
+echo "$VIYA_URL"
+export CAS_HOST="$(printf '%s' "$VIYA_URL" | sed -E 's#^https?://##; s#/.*$##')"
+echo "CAS_HOST=$CAS_HOST"
+
+
 nslookup -timeout=3 "$CAS_HOST" || getent hosts "$CAS_HOST" || echo "DNS FAIL"
 
 PORT="${CAS_PORT:-443}"
