@@ -9,6 +9,11 @@ python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501
 
 
 
+ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
+    -R 80:localhost:8501 nokey@localhost.run
+
+
+
 cd ~
 curl -fsSL -o cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
 chmod +x cloudflared
