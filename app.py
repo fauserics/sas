@@ -11,8 +11,14 @@ import streamlit as st
 # Fuerzo el fallback del traductor (scorer logístico tolerante y sin NaN)
 os.environ["SC_FORCE_FALLBACK"] = "1"
 
-from sas_code_translator import compile_sas_score, score_dataframe as score_df_local
-from viya_mas_client import score_row_via_rest  # requiere VIYA_URL, MAS_MODULE_ID y auth
+# IMPORTS (forma segura, sin alias largo en la misma línea)
+import sas_code_translator as sct
+try:
+    from viya_mas_client import score_row_via_rest  # requiere VIYA_URL, MAS_MODULE_ID y auth
+except Exception:
+    # Si no existe, defino un stub para que la app cargue igual
+    def score_row_via_rest(_row):
+        raise RuntimeError("viya_mas_client not available. Set VIYA_URL/MAS_MODULE_ID or add the module.")
 
 APP_TITLE = "Real Time Scoring App (powered by SAS)"
 ENGINE_LABEL = "GitHub (Python)"
@@ -28,7 +34,7 @@ SCORE_DIR = "score"
 DATA_DIR = "data"
 
 # ---------- helpers ----------
-def find_sas_score_file() -> str | None:
+def find_sas_score_file():
     preferred = ["score_code.sas", "model_score.sas", "model_score_code.sas", "dmcas_scorecode.sas"]
     for name in preferred:
         p = os.path.join(SCORE_DIR, name)
@@ -41,12 +47,12 @@ def find_sas_score_file() -> str | None:
             return os.path.join(SCORE_DIR, fn)
     return None
 
-def load_file_text(path: str) -> str:
+def load_file_text(path):
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
 @st.cache_data
-def load_input_vars() -> list[str]:
+def load_input_vars():
     p = os.path.join(SCORE_DIR, "inputVar.json")
     if not os.path.isfile(p):
         return []
@@ -63,7 +69,7 @@ def load_input_vars() -> list[str]:
         pass
     return []
 
-def _sanitize_var(v: str) -> str:
+def _sanitize_var(v):
     v = v.strip()
     m = re.match(r"^'([^']+)'\s*n$", v, flags=re.I)
     if m:
@@ -71,15 +77,17 @@ def _sanitize_var(v: str) -> str:
     v = re.sub(r"\W", "_", v)
     return v
 
-def extract_expected_inputs_from_sas(code: str) -> list[str]:
+def extract_expected_inputs_from_sas(code):
     miss_names = set(_sanitize_var(x) for x in re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", code, flags=re.I))
+    # si el código usa REASON de alguna forma, incluíla
     if re.search(r"\bREASON\b", code, flags=re.I) or re.search(r"\b_REASO[N_]\b", code, flags=re.I):
         miss_names.add("REASON")
     drop_prefixes = ("_", "EM_", "P_", "I_", "va__d__E_")
     keep = [n for n in miss_names if n and not n.upper().startswith(drop_prefixes)]
     return sorted(keep, key=str.upper)
 
-def parse_categorical_levels_from_sas(code: str) -> dict[str, list[str]]:
+def parse_categorical_levels_from_sas(code):
+    """Extrae niveles de bloques select(VAR); when('...') ... end; y mapea alias con y sin '_'."""
     cat = {}
     for m in re.finditer(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;(.+?)end\s*;", code, flags=re.I|re.S):
         var = m.group(1).strip()
@@ -93,13 +101,15 @@ def parse_categorical_levels_from_sas(code: str) -> dict[str, list[str]]:
                 cat[base] = lv
     return cat
 
-def build_cat_levels_ci(cat_levels: dict[str, list[str]]) -> dict[str, list[str]]:
+def build_cat_levels_ci(cat_levels):
+    """Mapa case-insensitive para categóricas, incluyendo alias con y sin '_'."""
     ci = {}
     for k, v in cat_levels.items():
         ci[k.lower()] = v
         base = k.lstrip("_").lower()
         ci[base] = v
         ci["_"+base] = v
+    # Forzar categóricas aunque el .sas no las indique (e.g. REASON)
     for f in FORCE_CAT:
         if f not in ci and "_"+f not in ci:
             if f in DEFAULT_LEVELS:
@@ -108,7 +118,7 @@ def build_cat_levels_ci(cat_levels: dict[str, list[str]]) -> dict[str, list[str]
     return ci
 
 @st.cache_data
-def load_sample_df(expected_cols: list[str]) -> pd.DataFrame:
+def load_sample_df(expected_cols):
     for cand in [os.path.join(DATA_DIR, "sample.csv"), os.path.join(DATA_DIR, "hmeq.csv")]:
         if os.path.isfile(cand):
             try:
@@ -118,7 +128,7 @@ def load_sample_df(expected_cols: list[str]) -> pd.DataFrame:
                 pass
     return pd.DataFrame(columns=expected_cols)
 
-def parse_mas_outputs(resp_json: dict, threshold: float = 0.5) -> tuple[float, int | None]:
+def parse_mas_outputs(resp_json, threshold=0.5):
     prob = None; label = None
     outputs = resp_json.get("outputs")
     if isinstance(outputs, list):
@@ -143,7 +153,9 @@ def parse_mas_outputs(resp_json: dict, threshold: float = 0.5) -> tuple[float, i
         lbl = (1 if (p is not None and p >= threshold) else 0)
     return (p if p is not None else float("nan")), lbl
 
-def build_single_record_form(fields: list[str], sample: pd.DataFrame, cat_levels_ci: dict[str, list[str]], key_prefix: str) -> dict:
+def build_single_record_form(fields, sample, cat_levels_ci, key_prefix):
+    """Form: selectbox para categóricas (case-insensitive) y number_input para numéricas.
+       Si se fuerza categórica sin niveles, usa text_input."""
     row = {}
     left, right = st.columns(2)
     for i, c in enumerate(fields):
@@ -172,11 +184,11 @@ def build_single_record_form(fields: list[str], sample: pd.DataFrame, cat_levels
             row[c] = tgt.number_input(c, value=default, key=key)
     return row
 
-def is_ds2_astore(code: str) -> bool:
+def is_ds2_astore(code):
     sigs = ("package score", "dcl package score", "scoreRecord()", "method run()", "enddata;")
     return any(s in code for s in sigs)
 
-def list_missing(fields: list[str], row: dict) -> list[str]:
+def list_missing(fields, row):
     missing_now = []
     for c in fields:
         v = row.get(c, None)
@@ -184,17 +196,20 @@ def list_missing(fields: list[str], row: dict) -> list[str]:
             missing_now.append(c)
     return missing_now
 
-def copy_aliases_inplace_ci(row: dict, cat_levels_ci: dict[str, list[str]]):
+def copy_aliases_inplace_ci(row, cat_levels_ci):
+    """Copia REASON <-> _REASON_ de forma case-insensitive si falta uno de los dos."""
     names = set()
     for k in list(cat_levels_ci.keys()):
         base = k.lstrip("_")
         names.add(base.lower()); names.add("_"+base.lower())
     for f in FORCE_CAT:
         names.add(f); names.add("_"+f)
+    # helpers CI
     def get_ci(d, key):
         for kk in d.keys():
             if kk.lower() == key.lower(): return d[kk], kk
         return None, None
+    # copiar
     for nm in names:
         if not nm.startswith("_"):
             base = nm
@@ -253,7 +268,7 @@ with col_t2:
     st.caption(f"Translates your SAS DATA step score code into a Python function (runs in {ENGINE_LABEL}).")
 
 sas_is_ds2 = False
-expected_auto_for_info: list[str] = []
+expected_auto_for_info = []
 if can_translate and sas_path:
     raw_code = load_file_text(sas_path)
     sas_is_ds2 = is_ds2_astore(raw_code)
@@ -264,9 +279,10 @@ if can_translate and sas_path:
             expected_auto_for_info = extract_expected_inputs_from_sas(raw_code)
             st.session_state.cat_levels = parse_categorical_levels_from_sas(raw_code)
             st.session_state.cat_levels_ci = build_cat_levels_ci(st.session_state.cat_levels)
+            # Unión: inputVar.json ∪ requeridos del SAS, excluyendo BAD
             combined_inputs = sorted(set((expected_from_json or [])) | set(expected_auto_for_info or []))
             combined_inputs = [c for c in combined_inputs if c.upper() != "BAD"]
-            score_fn, py_code, expected = compile_sas_score(
+            score_fn, py_code, expected = sct.compile_sas_score(
                 raw_code, func_name="sas_score",
                 expected_inputs=(combined_inputs or None)
             )
@@ -327,7 +343,7 @@ with tabs[0]:
                     fields_full = list(fields)
                     cat_keys   = set(st.session_state.cat_levels_ci.keys())
                     force_keys = set(FORCE_CAT)
-                    names = cat_keys | {f"_{f}" for f in force_keys} | force_keys
+                    names = cat_keys | set(f"_{f}" for f in force_keys) | force_keys
                     for nm in names:
                         base = nm.lstrip("_")
                         alias = f"_{base}"
@@ -345,7 +361,7 @@ with tabs[0]:
 
                     raw_out = st.session_state.score_fn(**df_in.iloc[0].to_dict()) or {}
                     if "EM_EVENTPROBABILITY" not in raw_out:
-                        scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
+                        scored = sct.score_dataframe(st.session_state.score_fn, df_in, threshold=thr)
                         p_raw = scored["prob_BAD"].iloc[0] if "prob_BAD" in scored else float("nan")
                         lbl_raw = scored["label_BAD"].iloc[0] if "label_BAD" in scored else None
                     else:
@@ -423,7 +439,7 @@ with tabs[2]:
 
             cat_keys   = set(st.session_state.cat_levels_ci.keys())
             force_keys = set(FORCE_CAT)
-            names = cat_keys | {f"_{f}" for f in force_keys} | force_keys
+            names = cat_keys | set(f"_{f}" for f in force_keys) | force_keys
             for nm in names:
                 base = nm.lstrip("_")
                 alias = f"_{base}"
@@ -444,7 +460,7 @@ with tabs[2]:
 
             if do_local_csv:
                 try:
-                    scored = score_df_local(st.session_state.score_fn, df, threshold=thr)
+                    scored = sct.score_dataframe(st.session_state.score_fn, df, threshold=thr)
                     st.success(f"Scored in {ENGINE_LABEL}: {len(scored)} rows.")
                     st.dataframe(scored.head(50))
                     st.download_button(
