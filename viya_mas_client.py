@@ -1,169 +1,87 @@
-# viya_mas_client.py  — Forced no-proxy MAS client (drop-in)
-import os, json, socket, requests
-from typing import Dict, List, Optional, Tuple
+# viya_mas_client.py
+import os, time, json, requests
+from typing import Dict, Any, Optional
 
-# ----------------- Config helpers -----------------
-def _get_base() -> str:
-    base = (os.getenv("VIYA_URL") or "").rstrip("/")
-    if not base:
-        raise RuntimeError("VIYA_URL is not set.")
-    return base
-
-def _module_id() -> str:
-    mid = (os.getenv("MAS_MODULE_ID") or "").strip()
-    if not mid:
-        raise RuntimeError("MAS_MODULE_ID is not set.")
-    return mid
-
-def _bool_env(name: str, default: bool = True) -> bool:
+def _get_env(name: str, required: bool = False) -> Optional[str]:
     v = os.getenv(name)
-    if v is None: return default
-    return str(v).strip().lower() not in ("0","false","no")
+    if required and not v:
+        raise RuntimeError(f"Missing env var: {name}")
+    return v
 
-def _verify_arg():
-    if not _bool_env("VIYA_TLS_VERIFY", True):
-        return False
-    cab = os.getenv("VIYA_CA_BUNDLE")
-    return cab if cab else True
-
-def _timeouts() -> Tuple[float,float]:
-    def _f(k, d):
-        try:
-            x = os.getenv(k)
-            return float(x) if x not in (None,"","None") else float(d)
-        except:
-            return float(d)
-    return (_f("VIYA_TIMEOUT_CONNECT", 30.0), _f("VIYA_TIMEOUT_READ", 120.0))
-
-def _token_from_env() -> Optional[str]:
-    tok = (os.getenv("BEARER_TOKEN") or os.getenv("SAS_SERVICES_TOKEN") or "").strip()
-    if not tok: return None
-    return tok.replace("\n","").replace("\r","").strip()
-
-def _oauth_token_url() -> str:
-    return os.getenv("OAUTH_TOKEN_URL", f"{_get_base()}/SASLogon/oauth/token")
-
-def _client_auth():
-    return os.getenv("SAS_CLIENT_ID","viya_client"), os.getenv("SAS_CLIENT_SECRET","")
-
-def _password_creds():
-    u, p = os.getenv("VIYA_USER"), os.getenv("VIYA_PASSWORD")
-    return (u,p) if (u and p) else None
-
-# ----------------- HTTP session (NO PROXY forced) -----------------
-def _session() -> requests.Session:
+def _build_session(retries: int = 2, backoff: float = 0.5) -> requests.Session:
     s = requests.Session()
-    s.trust_env = False       # IGNORE any system proxies
-    s.proxies.clear()
+    s.retries = retries  # marker propio (no urllib3 Retry para mantener deps simples)
+    s.backoff = backoff
     return s
 
-# ----------------- OAuth (if no token in secrets) -----------------
-def _fetch_token_with_password_grant() -> str:
-    creds = _password_creds()
-    if not creds:
-        raise RuntimeError("No token and no VIYA_USER/VIYA_PASSWORD provided.")
-    cid, csc = _client_auth()
-    r = _session().post(
-        _oauth_token_url(),
-        data={"grant_type":"password","username":creds[0],"password":creds[1],"scope":"openid"},
-        auth=(cid, csc),
-        headers={"Content-Type":"application/x-www-form-urlencoded"},
-        verify=_verify_arg(), timeout=_timeouts()
-    )
-    if r.status_code >= 400:
-        raise RuntimeError(f"Token error ({r.status_code}): {r.text}")
-    tok = r.json().get("access_token")
-    if not tok:
-        raise RuntimeError("Token response missing access_token.")
-    return tok
+def _post_json_with_simple_retry(
+    sess: requests.Session,
+    url: str,
+    payload: Dict[str, Any],
+    headers: Dict[str, str],
+    timeout: float,
+    verify: Any
+) -> requests.Response:
+    last_exc = None
+    attempts = getattr(sess, "retries", 2) + 1
+    backoff = getattr(sess, "backoff", 0.5)
+    for i in range(attempts):
+        try:
+            r = sess.post(url, json=payload, headers=headers, timeout=timeout, verify=verify)
+            # 401/403/5xx → igualmente hacemos raise_for_status para que la app lo informe
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last_exc = e
+            if i < attempts - 1:
+                time.sleep(backoff * (2 ** i))
+            else:
+                raise
+    # nunca llega
+    raise last_exc
 
-def _get_token() -> str:
-    tok = _token_from_env()
-    if tok: return tok
-    return _fetch_token_with_password_grant()
+def score_row_via_rest(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Env vars requeridas:
+      - VIYA_URL           (p.ej. https://disco-a20237-rg.gelenable.sas.com)
+      - MAS_MODULE_ID      (id del módulo MAS del modelo GB)
+      - BEARER_TOKEN  ó SAS_SERVICES_TOKEN  (access_token válido de SAS Logon)
+    Opcionales:
+      - VIYA_TIMEOUT       (segundos; default 30)
+      - VIYA_CA_BUNDLE     (ruta a PEM corporativo; si no está, usa verify=True)
+    """
+    base = _get_env("VIYA_URL", required=True).rstrip("/")
+    module_id = _get_env("MAS_MODULE_ID", required=True)
+    token = os.getenv("BEARER_TOKEN") or os.getenv("SAS_SERVICES_TOKEN")
+    if not token:
+        raise RuntimeError("Missing BEARER_TOKEN (o SAS_SERVICES_TOKEN).")
 
-def _auth_headers() -> Dict[str,str]:
-    return {"Authorization": f"Bearer {_get_token()}"}
+    url = f"{base}/microanalyticScore/modules/{module_id}/steps/score"
+    timeout = float(os.getenv("VIYA_TIMEOUT", "30"))
+    verify = os.getenv("VIYA_CA_BUNDLE") or True
 
-# ----------------- Public API -----------------
-def ping() -> bool:
-    try:
-        _ = list_modules(limit=1)
-        return True
-    except Exception:
-        return False
+    # MAS espera: {"inputs":[{"name":"VAR","value":...}, ...]}
+    payload = {"inputs": [{"name": k, "value": v} for k, v in (row or {}).items()]}
 
-def list_modules(limit: int = 200) -> List[Dict]:
-    url = f"{_get_base()}/microanalyticScore/modules?limit={int(limit)}"
-    r = _session().get(url, headers=_auth_headers(), verify=_verify_arg(), timeout=_timeouts())
-    if r.status_code >= 400:
-        raise RuntimeError(f"list_modules error ({r.status_code}): {r.text}")
-    data = r.json()
-    items = data.get("items") if isinstance(data, dict) else data
-    return items or []
-
-def get_module_info(module_id: Optional[str] = None) -> Dict:
-    mid = module_id or _module_id()
-    url = f"{_get_base()}/microanalyticScore/modules/{mid}"
-    r = _session().get(url, headers=_auth_headers(), verify=_verify_arg(), timeout=_timeouts())
-    if r.status_code >= 400:
-        raise RuntimeError(f"get_module_info error ({r.status_code}): {r.text}")
-    return r.json()
-
-def get_module_inputs(module_id: Optional[str] = None) -> List[Dict]:
-    info = get_module_info(module_id=module_id)
-    inputs = info.get("inputs") or []
-    return [{"name": it.get("name"), "type": it.get("type")} for it in inputs]
-
-def build_example_payload(row: Dict) -> Dict:
-    return {"inputs": [{"name": k, "value": v} for k, v in row.items()]}
-
-def score_row_via_rest(row: Dict, module_id: Optional[str] = None) -> Dict:
-    mid = module_id or _module_id()
-    url = f"{_get_base()}/microanalyticScore/modules/{mid}/steps/score"
-    payload = build_example_payload(row)
-    r = _session().post(url, json=payload, headers=_auth_headers(),
-                        verify=_verify_arg(), timeout=_timeouts())
-    if r.status_code >= 400:
-        raise RuntimeError(f"score_row_via_rest error ({r.status_code}): {r.text}")
-    return r.json()
-
-def score_row_via_rest_noproxy(row: Dict, module_id: Optional[str] = None) -> Dict:
-    # identical to score_row_via_rest (kept for compatibility)
-    return score_row_via_rest(row, module_id=module_id)
-
-def sync_input_schema_to_file(path: str = "score/inputVar.json", module_id: Optional[str] = None) -> List[str]:
-    vars = get_module_inputs(module_id=module_id)
-    names = [v["name"] for v in vars if v.get("name")]
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"inputVariables": [{"name": n} for n in names]}, f, indent=2)
-    return names
-
-# ----------------- Connectivity diag -----------------
-def connectivity_check() -> Dict:
-    info = {
-        "base": _get_base(),
-        "timeouts": _timeouts(),
-        "env": {
-            "HTTPS_PROXY": os.getenv("HTTPS_PROXY"),
-            "HTTP_PROXY": os.getenv("HTTP_PROXY"),
-            "NO_PROXY": os.getenv("NO_PROXY"),
-            "VIYA_TLS_VERIFY": os.getenv("VIYA_TLS_VERIFY"),
-        }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
     }
-    try:
-        host = info["base"].split("://",1)[-1].split("/",1)[0]
-        info["dns"] = {"host": host, "ip": socket.gethostbyname(host)}
-    except Exception as e:
-        info["dns_error"] = repr(e)
 
-    url = f"{info['base']}/microanalyticScore/modules?limit=1"
-    try:
-        r = _session().get(url, headers=_auth_headers(), verify=_verify_arg(), timeout=_timeouts())
-        info["list_noproxy"] = {"status": r.status_code, "ok": (r.status_code==200)}
-        if r.status_code != 200:
-            info["list_noproxy"]["body"] = r.text[:400]
-    except Exception as e:
-        info["list_noproxy_error"] = repr(e)
-    return info
+    sess = _build_session(retries=int(os.getenv("VIYA_RETRIES", "2")), backoff=0.5)
+    resp = _post_json_with_simple_retry(sess, url, payload, headers, timeout, verify)
+    # devuelve el JSON crudo; app.py ya llama a parse_mas_outputs(...)
+    return resp.json()
+
+def get_module_signature() -> Dict[str, Any]:
+    """Utilidad opcional para depurar: trae metadata del módulo (inputs/outputs)."""
+    base = _get_env("VIYA_URL", required=True).rstrip("/")
+    module_id = _get_env("MAS_MODULE_ID", required=True)
+    token = os.getenv("BEARER_TOKEN") or os.getenv("SAS_SERVICES_TOKEN")
+    if not token:
+        raise RuntimeError("Missing BEARER_TOKEN (o SAS_SERVICES_TOKEN).")
+    url = f"{base}/microanalyticScore/modules/{module_id}"
+    verify = os.getenv("VIYA_CA_BUNDLE") or True
+    r = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=15, verify=verify)
+    r.raise_for_status()
+    return r.json()
