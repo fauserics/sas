@@ -1,4 +1,6 @@
 # VIYA REST
+https://2azvvgp9rxjiqcyjrxltwy.streamlit.app/
+
 curl -s -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" \
   "$VIYA_URL/microanalyticScore/modules/gradient_boosting__interactive-m" \
 | jq '{id,name,version,inputs,outputs}'
