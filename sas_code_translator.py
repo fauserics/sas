@@ -25,6 +25,12 @@ def COALESCE(*args):
         if not MISSING(v): return v
     return None
 
+def _to_num(x):
+    try:
+        return float(x)
+    except Exception:
+        return 0.0
+
 # ===== core text utils =====
 def _strip_comments(s: str) -> str:
     s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)
@@ -79,7 +85,6 @@ def _clean_stmt(stmt: str) -> str:
 
 # ===== preprocessing for VDMML Logistic DATA step =====
 def _sanitize_name_literals(txt: str) -> str:
-    # 'VAR'n -> VAR
     def repl(m):
         raw = m.group(1)
         s = re.sub(r"\W", "_", raw)
@@ -104,7 +109,6 @@ def _arrays_to_python_lists(txt: str) -> str:
             name, n = m2.group(1), int(m2.group(2))
             out_lines.append(f"{name} = [0.0] * ({n}+1)")
             continue
-        # Dot product loop (one-liner, no inner indent)
         m3 = re.match(
             r"\s*do\s+[A-Za-z_]\w*\s*=\s*1\s*to\s*(\d+)\s*;\s*_linp_\s*\+\s*([A-Za-z_]\w*)\s*\[\s*_[A-Za-z_]\w*_\s*\]\s*\*\s*([A-Za-z_]\w*)\s*\[\s*_[A-Za-z_]\w*_\s*\]\s*;\s*end\s*;",
             line, flags=re.I
@@ -120,7 +124,6 @@ def preprocess_vdmml_logit_datastep(sas_code: str) -> str:
     s = _sanitize_name_literals(sas_code)
     s = _braces_to_brackets(s)
     s = _arrays_to_python_lists(s)
-    # remove labels/goto + decls
     s = re.sub(r"^\s*\w+\s*:\s*$", "", s, flags=re.M)
     s = re.sub(r"\bgoto\s+\w+\s*;", "", s, flags=re.I)
     s = re.sub(r"^\s*(drop|length|label|format|options)\b.*?$", "", s, flags=re.I|re.M)
@@ -174,7 +177,6 @@ def translate_sas_to_python_body(sas_code: str) -> Tuple[str, List[str]]:
 def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]:
     s = preprocess_vdmml_logit_datastep(sas_code)
 
-    # 1) beta array
     m = re.search(r"array\s+(_beta_[A-Za-z0-9_]+)\s*\[\s*(\d+)\s*\]\s*_temporary_\s*\((.*?)\)\s*;", s, flags=re.I|re.S)
     if not m:
         raise SyntaxError("No beta array found for logistic fallback.")
@@ -185,14 +187,12 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
         raise SyntaxError("Beta length mismatch.")
     beta = [None] + [float(t) for t in toks]
 
-    # 2) xrow assignments  (name, idx, expr)
     xrow_name = None
     x_assigns = {}
     for name, i_str, expr in re.findall(r"(_xrow_[A-Za-z0-9_]+)\s*\[\s*(\d+)\s*\]\s*=\s*([^;]+);", s, flags=re.I|re.S):
         xrow_name = xrow_name or name
         x_assigns[int(i_str)] = expr.strip()
 
-    # 3) select/when for a categorical (e.g., REASON)
     reason_map, sel_var = {}, None
     sel = re.search(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;(.+?)end\s*;", s, flags=re.I|re.S)
     if sel:
@@ -203,14 +203,13 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
             if mset:
                 reason_map[int(mset.group(1))] = cond.strip()
 
-    # 4) required vars by missing(...)
     miss_vars = re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", s, flags=re.I)
     def san(v):
         m = re.match(r"^'([^']+)'\s*n$", v, flags=re.I)
         return m.group(1) if m else v
-    required = sorted({san(v) for v in miss_vars})
+    # NO exigir BAD
+    required = sorted({san(v) for v in miss_vars if san(v).upper() != "BAD"})
 
-    # 5) inputs = required ∪ vars en RHS de x_assigns ∪ sel_var
     inputs = set(required)
     for expr in x_assigns.values():
         for tok in re.findall(r"[A-Za-z_]\w*", expr):
@@ -220,29 +219,21 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
     if sel_var: inputs.add(sel_var)
     inputs = sorted(inputs)
 
-    # 6) build scorer (plano)
     body = []
     body.append("# fallback logistic scorer (flat)")
     for v in inputs:
         body.append(f"{v} = row.get('{v}', None)")
-    # quick missing gate (if required were found)
     if required:
         checks = " or ".join([f"{v} is None" for v in required])
         body.append(f"if {checks}:")
         body.append("    return {'EM_EVENTPROBABILITY': None}")
 
     body.append(f"x = [0.0]*({n+1})")
-
-    # Intercept si está explicitado
     if 1 in x_assigns and re.fullmatch(r"1(\.0+)?", x_assigns[1]):
         body.append("x[1] = 1.0")
-
-    # Dummies de select/when
     if reason_map and sel_var:
         for idx in sorted(reason_map):
             body.append(f"x[{idx}] = 1.0 if {sel_var} == {reason_map[idx]} else 0.0")
-
-    # Asignaciones directas
     for idx in sorted(x_assigns):
         if idx == 1 and re.fullmatch(r"1(\.0+)?", x_assigns[1]):
             continue
@@ -252,15 +243,16 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
         if re.fullmatch(r"\d+(\.\d+)?", expr):
             body.append(f"x[{idx}] = float({expr})")
         else:
-            body.append(f"x[{idx}] = {expr}")
+            # convierte None/str a num seguro
+            body.append(f"x[{idx}] = _to_num({expr})")
 
-    body.append(f"BETA = {beta}")
+    body.append(f"BETA = { [None] + beta[1:] }")
     body.append(f"_linp_ = sum(x[i]*BETA[i] for i in range(1, {n+1}))")
     body.append("p1 = (1.0/(1.0+math.exp(-_linp_)) if _linp_>0 else math.exp(_linp_)/(1.0+math.exp(_linp_)))")
     body.append("return {'EM_EVENTPROBABILITY': p1}")
 
     fn_src = "def __scorer__(**row):\n" + "\n".join("    "+ln for ln in body)
-    loc = {"math": math}
+    loc = {"math": math, "_to_num": _to_num}
     exec(fn_src, loc, loc)
     scorer = loc["__scorer__"]
 
@@ -271,7 +263,7 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
 def _pick_prob_from_env(env: dict) -> float | None:
     for k in ("EM_EVENTPROBABILITY","EM_PREDICTION"):
         if k in env and env[k] is not None:
-            try: return float(k and env[k])
+            try: return float(env[k])
             except Exception: pass
     p_keys = [k for k in env.keys() if k.upper().startswith("P_") and env[k] is not None]
     if not p_keys: return None
@@ -289,7 +281,14 @@ def compile_sas_score(sas_code: str, func_name: str = "sas_score", expected_inpu
                       ) -> Tuple[Callable, str, List[str]]:
     pre = preprocess_vdmml_logit_datastep(sas_code)
     body, discovered_inputs = translate_sas_to_python_body(pre)
-    inputs = expected_inputs or discovered_inputs or []
+
+    # incluir SIEMPRE inputs descubiertos (evita NameError), pero el form puede mostrar menos
+    merged_inputs = sorted(set(expected_inputs or []) | set(discovered_inputs or []))
+
+    # si el código exige BAD en missing(...), forzamos fallback (para no bloquear por BAD)
+    if re.search(r"missing\(\s*'?BAD'?\s*\)", pre, flags=re.I):
+        scorer, display_code, fb_inputs = _compile_logistic_fallback(sas_code)
+        return scorer, display_code, (expected_inputs or fb_inputs)
 
     def _try_compile(body_code: str, inputs_list: list[str]):
         def _score_fn(**row):
@@ -299,7 +298,9 @@ def compile_sas_score(sas_code: str, func_name: str = "sas_score", expected_inpu
                 "_linp_": 0.0,
                 "_badval_": 0
             }
-            for name in inputs_list: env[name] = row.get(name, None)
+            # cargar todas las variables de entrada detectadas
+            for name in inputs_list:
+                env[name] = row.get(name, None)
             for k, v in row.items():
                 if k not in env: env[k] = v
             exec(body_code, {}, env)
@@ -314,19 +315,17 @@ def compile_sas_score(sas_code: str, func_name: str = "sas_score", expected_inpu
         return _score_fn
 
     try:
-        # valida sintaxis rápido
         exec(body, {}, {"math": math, "_linp_":0.0, "_badval_":0})
-        score_fn = _try_compile(body, inputs)
+        score_fn = _try_compile(body, merged_inputs)
         display_code = (
             "def " + func_name + "(**row):\n"
-            "    # inputs available: " + ", ".join(inputs) + "\n"
+            "    # inputs available: " + ", ".join(merged_inputs) + "\n"
             "    # --- translated SAS body ---\n" +
             "\n".join(["    " + ln for ln in body.splitlines()]) + "\n" +
             "    # --- end translated body ---\n"
         )
-        return score_fn, display_code, inputs
+        return score_fn, display_code, merged_inputs
     except Exception:
-        # fallback plano para logística
         scorer, display_code, fb_inputs = _compile_logistic_fallback(sas_code)
         return scorer, display_code, (expected_inputs or fb_inputs)
 
