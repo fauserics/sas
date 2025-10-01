@@ -1,4 +1,19 @@
 # en la VM
+# 1) Tomá el host del VIYA_URL
+echo "$VIYA_URL"
+export CAS_HOST="$(printf '%s' "$VIYA_URL" | sed -E 's#^https?://##; s#/.*$##')"
+
+# 2) Vars para SWAT REST
+export CAS_PROTOCOL="https"
+export CAS_PORT="443"
+export SAS_SERVICES_TOKEN="***"      # rota el token que pegaste antes
+# si usan CA corporativa:
+# export CAS_SSL_CA_LIST="/ruta/ca_corporativa.pem"
+export NO_PROXY="$CAS_HOST,.$(echo "$CAS_HOST" | cut -d. -f2-)"
+
+
+
+
 export NO_PROXY="$CAS_HOST,.gelenable.sas.com"
 
 python - <<'PY'
