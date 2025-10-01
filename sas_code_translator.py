@@ -1,12 +1,12 @@
 # sas_code_translator.py
 # Translate SAS DATA step scoring code -> Python function.
-# Also includes preprocessing for typical VDMML Logistic code patterns.
+# Includes preprocessing for typical VDMML Logistic code patterns.
 
 import re, math, types
 import pandas as pd
 from typing import Callable, List, Tuple
 
-# ===== runtime helpers available to translated code =====
+# ===== runtime helpers =====
 def MISSING(x):
     return x is None or (isinstance(x, float) and math.isnan(x)) or (isinstance(x, str) and x == "")
 
@@ -96,20 +96,14 @@ def _arrays_to_python_lists(txt: str) -> str:
             py = f"{name} = [0.0] * ({n}+1)"
             out_lines.append(py)
             continue
-        # zeroing loop: do _i_=1 to N; arr[_i_] = 0; end;
-        mzero = re.match(r"\s*do\s+([A-Za-z_]\w*)\s*=\s*1\s*to\s*(\d+)\s*;\s*([A-Za-z_]\w*)\s*\{\s*_\1_\s*\}\s*=\s*0\s*;\s*end\s*;", line, flags=re.I)
-        if mzero:
-            # already initialized to zeros; skip
-            out_lines.append("# init zeros (removed)")
-            continue
-        # dot-product loop: do _i_=1 to N; _linp_ + arr1{_i_} * arr2{_i_}; end;
+        # dot-product loop -> UNA SOLA LÍNEA: sin indent interno
         m3 = re.match(
             r"\s*do\s+([A-Za-z_]\w*)\s*=\s*1\s*to\s*(\d+)\s*;\s*_linp_\s*\+\s*([A-Za-z_]\w*)\s*\{\s*_\1_\s*\}\s*\*\s*([A-Za-z_]\w*)\s*\{\s*_\1_\s*\}\s*;\s*end\s*;",
             line, flags=re.I
         )
         if m3:
             it, n, a1, a2 = m3.group(1), int(m3.group(2)), m3.group(3), m3.group(4)
-            py = f"if _badval_ == 0:\n    _linp_ = _linp_ + sum({a1}[i] * {a2}[i] for i in range(1, {n}+1))"
+            py = f"_linp_ = _linp_ + (sum({a1}[i] * {a2}[i] for i in range(1, {n}+1)) if _badval_ == 0 else 0.0)"
             out_lines.append(py)
             continue
         out_lines.append(line)
@@ -156,7 +150,7 @@ def preprocess_vdmml_logit_datastep(sas_code: str) -> str:
     s = _arrays_to_python_lists(s)
     s = _select_when_to_if(s)
     s = _braces_to_brackets(s)
-    # remove labels/goto (we keep _badval_ gating)
+    # remove labels/goto + decls
     s = re.sub(r"^\s*\w+\s*:\s*$", "", s, flags=re.M)         # labels like skip_123:
     s = re.sub(r"\bgoto\s+\w+\s*;", "", s, flags=re.I)        # remove GOTO
     s = re.sub(r"^\s*(drop|length|label|format|options)\b.*?$", "", s, flags=re.I|re.M)
