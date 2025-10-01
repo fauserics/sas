@@ -1,3 +1,23 @@
+export CAS_HOST="$(printf '%s' "${VIYA_URL:-disco-a20237-rg.gelenable.sas.com}" | sed -E 's#^https?://##; s#/.*$##')"
+echo "CAS_HOST=$CAS_HOST"
+
+# 2) Vamos por CAS REST via Ingress (HTTPS 443)
+export CAS_PROTOCOL="https"
+export CAS_PORT="443"
+export NO_PROXY="$CAS_HOST,.$(echo "$CAS_HOST" | cut -d. -f2-)"
+# si usan CA corporativa, descomentar y poner la ruta:
+# export CAS_SSL_CA_LIST="/ruta/corporate-ca.pem"
+
+# 3) Checks rápidos (3s cada uno)
+getent hosts "$CAS_HOST" || echo "DNS FAIL"
+nc -vz -w 3 "$CAS_HOST" 443 || echo "TCP 443 FAIL"
+curl -sS -m 5 \
+  -H "Authorization: Bearer $SAS_SERVICES_TOKEN" \
+  -H "Content-Type: application/json" \
+  ${CAS_SSL_CA_LIST:+ --cacert "$CAS_SSL_CA_LIST"} \
+  -X POST "https://$CAS_HOST/cas/sessions" -d '{}' | head -c 200 || echo "REST FAIL"
+
+
 getent hosts "$CAS_HOST" || echo "DNS FAIL"
 
 nc -vz -w 3 "$CAS_HOST" 443 || echo "TCP FAIL 443"
