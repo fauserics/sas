@@ -1,4 +1,17 @@
+#VIYA SWAT
+export CAS_HOST="<host_de_CAS>"
+export CAS_PORT="8777"            # o 5570
+export CAS_PROTOCOL="http"        # o "https"
+export CAS_ASTORE_NAME="gb_astore"
+export CAS_ASTORE_CASLIB="Public"
+export CAS_WORK_CASLIB="Public"
+export SAS_SERVICES_TOKEN="<TU_TOKEN>"   # o CAS_USER/CAS_PASSWORD
+
+
+
 # VIYA REST
+
+
 
 ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 \
     -R 80:localhost:8501 nokey@localhost.run
