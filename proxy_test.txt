@@ -1,4 +1,13 @@
 #VIYA SWAT
+python3 -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+
+curl -sf http://127.0.0.1:8501/healthz && echo "OK"
+
+hostname -I | awk '{print $1}'
+
+
+
+
 
 python3 -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
 
