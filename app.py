@@ -72,7 +72,6 @@ def extract_expected_inputs_from_sas(code: str) -> list[str]:
     return sorted(keep, key=str.upper)
 
 def parse_categorical_levels_from_sas(code: str) -> dict[str, list[str]]:
-    """Detecta bloques select( VAR ); when('A') ...; -> {'VAR': ['A','B',...]}"""
     cat = {}
     for m in re.finditer(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;(.+?)end\s*;", code, flags=re.I|re.S):
         var = m.group(1).strip()
@@ -119,17 +118,14 @@ def parse_mas_outputs(resp_json: dict, threshold: float = 0.5) -> tuple[float, i
     return (p if p is not None else float("nan")), lbl
 
 def build_single_record_form(fields: list[str], sample: pd.DataFrame, cat_levels: dict[str, list[str]], key_prefix: str) -> dict:
-    """Fuerza number_input para no-categóricas y selectbox con opciones SAS para categóricas."""
     row = {}
     left, right = st.columns(2)
     for i, c in enumerate(fields):
         tgt = left if i % 2 == 0 else right
         key = f"{key_prefix}__{c}"
         if c in cat_levels and cat_levels[c]:
-            # opciones detectadas del SAS
             row[c] = tgt.selectbox(c, cat_levels[c], index=0, key=key)
         else:
-            # numérico
             default = 0.0
             if c in sample.columns and pd.api.types.is_numeric_dtype(sample[c]):
                 s = sample[c]
@@ -202,9 +198,12 @@ if can_translate and sas_path:
     else:
         try:
             expected_auto_for_info = extract_expected_inputs_from_sas(raw_code)
-            st.session_state.cat_levels = parse_categorical_levels_from_sas(raw_code)  # <-- NUEVO
+            st.session_state.cat_levels = parse_categorical_levels_from_sas(raw_code)
             # Unión: JSON ∪ requeridos del SAS
             combined_inputs = sorted(set((expected_from_json or [])) | set(expected_auto_for_info or []))
+            # REMOVER OBJETIVO DEL FORM
+            combined_inputs = [c for c in combined_inputs if c.upper() != "BAD"]
+            # compilar (el compilador ahora incluye tb. variables detectadas en el cuerpo)
             score_fn, py_code, expected = compile_sas_score(
                 raw_code, func_name="sas_score",
                 expected_inputs=(combined_inputs or None)
@@ -212,7 +211,7 @@ if can_translate and sas_path:
             st.session_state.score_fn = score_fn
             st.session_state.score_py = py_code
             st.session_state.expected_cols = combined_inputs or expected or []
-            st.success(f"Translation OK. Found {len(st.session_state.expected_cols)} input fields.")
+            st.success(f"Translation OK. Inputs on form: {len(st.session_state.expected_cols)} (target BAD is excluded).")
         except Exception as e:
             st.error(f"Translation failed: {e}")
 
@@ -245,22 +244,19 @@ with tabs[0]:
                          disabled=(st.session_state.score_fn is None))
 
     if do_local:
-        # Chequeo de faltantes
-        missing_now = list_missing(fields, row)
+        missing_now = [c for c in fields if (row.get(c) in (None, "") or (isinstance(row.get(c), float) and pd.isna(row.get(c)))) ]
         if missing_now:
             st.error("Complete the required inputs before scoring: " + ", ".join(missing_now))
         else:
             try:
                 df_in = pd.DataFrame([row]).reindex(columns=fields, fill_value=None)
-                # Cast numéricos: todo lo que NO sea categórico detectado -> float
                 cat_fields = set(st.session_state.cat_levels.keys())
                 for col in df_in.columns:
                     if col not in cat_fields:
                         df_in[col] = pd.to_numeric(df_in[col], errors="coerce")
-                # Score
                 scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
-                p_raw = scored["prob_BAD"].iloc[0] if "prob_BAD" in scored else float("nan")
-                lbl_raw = scored["label_BAD"].iloc[0] if "label_BAD" in scored else None
+                p_raw = scored.get("prob_BAD", pd.Series([float("nan")])).iloc[0]
+                lbl_raw = scored.get("label_BAD", pd.Series([None])).iloc[0]
                 p = None if (pd.isna(p_raw)) else float(p_raw)
                 lbl = None
                 if lbl_raw is not None and not (isinstance(lbl_raw, float) and pd.isna(lbl_raw)):
@@ -268,7 +264,7 @@ with tabs[0]:
                     except Exception: lbl = None
 
                 if p is None:
-                    st.warning("Probability is NaN. Check that categorical values (e.g., REASON) match SAS levels and numeric fields are filled.")
+                    st.warning("Probability is NaN. Check categorical values (e.g., REASON) and numeric fields.")
                 else:
                     st.success(f"Scored in {ENGINE_LABEL}.")
                 c1, c2 = st.columns(2)
@@ -290,7 +286,7 @@ with tabs[1]:
     do_rest  = st.button("Score on Viya (REST)", use_container_width=True, key="btn_viya_single")
 
     if do_rest:
-        missing_now = list_missing(fields, row_rest)
+        missing_now = [c for c in fields if (row_rest.get(c) in (None, "") or (isinstance(row_rest.get(c), float) and pd.isna(row_rest.get(c)))) ]
         if missing_now:
             st.error("Complete the required inputs before scoring: " + ", ".join(missing_now))
         else:
@@ -318,7 +314,6 @@ with tabs[2]:
                 if c not in df.columns:
                     df[c] = None
             df = df[fields]
-            # cast numéricos
             cat_fields = set(st.session_state.cat_levels.keys())
             for col in df.columns:
                 if col not in cat_fields:
@@ -387,7 +382,7 @@ with tabs[3]:
     if st.session_state.cat_levels:
         with st.expander("Categorical levels detected from SAS (select/when)"):
             st.json(st.session_state.cat_levels)
-    st.write("- Current expected inputs (union JSON ∪ SAS):", len(st.session_state.expected_cols))
+    st.write("- Current expected inputs (union JSON ∪ SAS, excluding BAD):", len(st.session_state.expected_cols))
     if st.session_state.expected_cols:
         with st.expander("Show expected input fields"):
             st.code("\n".join(st.session_state.expected_cols))
