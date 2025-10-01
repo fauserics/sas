@@ -1,5 +1,8 @@
 #VIYA SWAT
 
+python3 -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true
+
+
 ss -ltnp | grep 8501 || lsof -i :8501
 
 
