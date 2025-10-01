@@ -13,8 +13,8 @@ from viya_mas_client import score_row_via_rest  # requiere VIYA_URL, MAS_MODULE_
 APP_TITLE = "Real Time Scoring App (powered by SAS)"
 ENGINE_LABEL = "GitHub (Python)"
 
-# Forzamos estas variables como categóricas si no se detectan en el .sas
-FORCE_CAT = {"reason"}                  # case-insensitive
+# Forzar variables categóricas si no se detectan en el .sas (case-insensitive)
+FORCE_CAT = {"reason"}
 DEFAULT_LEVELS = {"reason": ["DebtCon", "HomeImp"]}
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -101,7 +101,6 @@ def build_cat_levels_ci(cat_levels: dict[str, list[str]]) -> dict[str, list[str]
     # forzar categóricas aunque no estén en el SAS
     for f in FORCE_CAT:
         if f not in ci and "_"+f not in ci:
-            # usar defaults si hay, sino queda sin niveles (se pedirá texto libre)
             if f in DEFAULT_LEVELS:
                 ci[f] = DEFAULT_LEVELS[f]
                 ci["_"+f] = DEFAULT_LEVELS[f]
@@ -153,12 +152,10 @@ def build_single_record_form(fields: list[str], sample: pd.DataFrame, cat_levels
         key = f"{key_prefix}__{c}"
         cname = c.lower()
         levels = cat_levels_ci.get(cname) or cat_levels_ci.get("_"+cname)
-        # ¿es categórica forzada sin niveles?
         forced = cname in FORCE_CAT or ("_"+cname) in FORCE_CAT
         if levels:
             row[c] = tgt.selectbox(c, levels, index=0, key=key)
         elif forced:
-            # si hay muestra con valores, sugerir algunos
             sugg = []
             if c in sample.columns and sample[c].dtype == object:
                 sugg = sorted(list(pd.Series(sample[c]).dropna().unique()))[:20]
@@ -169,7 +166,6 @@ def build_single_record_form(fields: list[str], sample: pd.DataFrame, cat_levels
             else:
                 row[c] = tgt.text_input(c, value="", key=key)
         else:
-            # numérico
             default = 0.0
             if c in sample.columns and pd.api.types.is_numeric_dtype(sample[c]):
                 s = sample[c]
@@ -191,23 +187,16 @@ def list_missing(fields: list[str], row: dict) -> list[str]:
 
 def copy_aliases_inplace_ci(row: dict, cat_levels_ci: dict[str, list[str]]):
     """Copia REASON <-> _REASON_ de forma case-insensitive si falta uno de los dos."""
-    # construimos el set de nombres (con y sin '_') para todas las categóricas conocidas o forzadas
     names = set()
     for k in list(cat_levels_ci.keys()):
         base = k.lstrip("_")
         names.add(base.lower()); names.add("_"+base.lower())
     for f in FORCE_CAT:
         names.add(f); names.add("_"+f)
-    # helpers CI
     def get_ci(d, key):
         for kk in d.keys():
             if kk.lower() == key.lower(): return d[kk], kk
         return None, None
-    def set_if_missing_ci(d, key, val):
-        v, realk = get_ci(d, key)
-        if v is None and val is not None and val != "":
-            d[key] = val
-    # copiar
     for nm in names:
         if not nm.startswith("_"):
             base = nm
@@ -276,7 +265,6 @@ if can_translate and sas_path:
             expected_auto_for_info = extract_expected_inputs_from_sas(raw_code)
             st.session_state.cat_levels = parse_categorical_levels_from_sas(raw_code)
             st.session_state.cat_levels_ci = build_cat_levels_ci(st.session_state.cat_levels)
-            # Unión: JSON ∪ requeridos del SAS, excluyendo BAD
             combined_inputs = sorted(set((expected_from_json or [])) | set(expected_auto_for_info or []))
             combined_inputs = [c for c in combined_inputs if c.upper() != "BAD"]
             score_fn, py_code, expected = compile_sas_score(
@@ -319,13 +307,10 @@ with tabs[0]:
                          disabled=(st.session_state.score_fn is None))
 
     if do_local:
-        # aliases categóricas (CI)
         copy_aliases_inplace_ci(row, st.session_state.cat_levels_ci)
-        # validar categóricas contra niveles si existen
         invalid = []
         for key_ci, levels in st.session_state.cat_levels_ci.items():
             base = key_ci.lstrip("_")
-            # leer valor (CI) desde row
             val = None
             for k in row.keys():
                 if k.lower() == key_ci or k.lower() == base:
@@ -335,23 +320,25 @@ with tabs[0]:
         if invalid:
             st.error("Invalid categorical values: " + "; ".join(invalid))
         else:
-            # faltantes
             missing_now = list_missing(fields, row)
             if missing_now:
                 st.error("Complete the required inputs before scoring: " + ", ".join(missing_now))
             else:
                 try:
-                    # asegurar columnas alias en el DF (para que el scorer reciba REASON y _REASON_)
+                    # --- FIX AQUÍ: sets para la unión ---
                     fields_full = list(fields)
-                    for nm in set(list(st.session_state.cat_levels_ci.keys()) |
-                                  {"_"+f for f in FORCE_CAT} | set(FORCE_CAT)):
+                    cat_keys   = set(st.session_state.cat_levels_ci.keys())
+                    force_keys = set(FORCE_CAT)
+                    names = cat_keys | {f"_{f}" for f in force_keys} | force_keys
+                    for nm in names:
                         base = nm.lstrip("_")
-                        if base not in fields_full: fields_full.append(base)
-                        alias = "_"+base
-                        if alias not in fields_full: fields_full.append(alias)
+                        alias = f"_{base}"
+                        if base not in fields_full:
+                            fields_full.append(base)
+                        if alias not in fields_full:
+                            fields_full.append(alias)
 
                     df_in = pd.DataFrame([row]).reindex(columns=fields_full, fill_value=None)
-                    # cast numérico sólo para no-categóricas (CI)
                     cat_fields_ci = {k.lstrip("_").lower() for k in st.session_state.cat_levels_ci.keys()} | set(FORCE_CAT)
                     for col in df_in.columns:
                         if col.lower() not in cat_fields_ci:
@@ -431,16 +418,18 @@ with tabs[2]:
                     df[c] = None
             df = df[fields]
 
-            # aliases en DF
-            for nm in set(list(st.session_state.cat_levels_ci.keys()) |
-                          {"_"+f for f in FORCE_CAT} | set(FORCE_CAT)):
+            # --- FIX AQUÍ: sets para la unión ---
+            cat_keys   = set(st.session_state.cat_levels_ci.keys())
+            force_keys = set(FORCE_CAT)
+            names = cat_keys | {f"_{f}" for f in force_keys} | force_keys
+            for nm in names:
                 base = nm.lstrip("_")
+                alias = f"_{base}"
                 if nm in df.columns and base not in df.columns:
                     df[base] = df[nm]
-                if base in df.columns and ("_"+base) not in df.columns:
-                    df["_"+base] = df[base]
+                if base in df.columns and alias not in df.columns:
+                    df[alias] = df[base]
 
-            # cast numérico sólo para no-categóricas
             cat_fields_ci = {k.lstrip("_").lower() for k in st.session_state.cat_levels_ci.keys()} | set(FORCE_CAT)
             for col in df.columns:
                 if col.lower() not in cat_fields_ci:
