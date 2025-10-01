@@ -243,10 +243,9 @@ def _compile_logistic_fallback(sas_code: str) -> Tuple[Callable, str, List[str]]
         if re.fullmatch(r"\d+(\.\d+)?", expr):
             body.append(f"x[{idx}] = float({expr})")
         else:
-            # convierte None/str a num seguro
             body.append(f"x[{idx}] = _to_num({expr})")
 
-    body.append(f"BETA = { [None] + beta[1:] }")
+    body.append(f"BETA = {beta}")
     body.append(f"_linp_ = sum(x[i]*BETA[i] for i in range(1, {n+1}))")
     body.append("p1 = (1.0/(1.0+math.exp(-_linp_)) if _linp_>0 else math.exp(_linp_)/(1.0+math.exp(_linp_)))")
     body.append("return {'EM_EVENTPROBABILITY': p1}")
@@ -282,10 +281,8 @@ def compile_sas_score(sas_code: str, func_name: str = "sas_score", expected_inpu
     pre = preprocess_vdmml_logit_datastep(sas_code)
     body, discovered_inputs = translate_sas_to_python_body(pre)
 
-    # incluir SIEMPRE inputs descubiertos (evita NameError), pero el form puede mostrar menos
     merged_inputs = sorted(set(expected_inputs or []) | set(discovered_inputs or []))
 
-    # si el código exige BAD en missing(...), forzamos fallback (para no bloquear por BAD)
     if re.search(r"missing\(\s*'?BAD'?\s*\)", pre, flags=re.I):
         scorer, display_code, fb_inputs = _compile_logistic_fallback(sas_code)
         return scorer, display_code, (expected_inputs or fb_inputs)
@@ -298,7 +295,6 @@ def compile_sas_score(sas_code: str, func_name: str = "sas_score", expected_inpu
                 "_linp_": 0.0,
                 "_badval_": 0
             }
-            # cargar todas las variables de entrada detectadas
             for name in inputs_list:
                 env[name] = row.get(name, None)
             for k, v in row.items():
