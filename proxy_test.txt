@@ -1,5 +1,8 @@
 #VIYA SWAT
 
+ss -ltnp | grep 8501 || lsof -i :8501
+
+
 # 1) Capturo el Python que usa "python3"
 PY=$(python3 -c 'import sys; print(sys.executable)'); echo "Usando Python: $PY"
 
