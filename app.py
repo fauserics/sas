@@ -158,13 +158,98 @@ else:
     inline_translator_active = False
 
 # =========================
-# Viya REST client
+# Viya REST client (MAS)
 # =========================
 try:
     from viya_mas_client import score_row_via_rest
 except Exception:
     def score_row_via_rest(_row):
         raise RuntimeError("viya_mas_client not available. Set VIYA_URL/MAS_MODULE_ID or add the module.")
+
+# =========================
+# CAS (SWAT) client — directo a ASTORE
+# =========================
+try:
+    import swat as _swat
+except Exception:
+    _swat = None
+
+def _score_row_via_cas(row_dict, threshold=0.5):
+    if _swat is None:
+        raise RuntimeError("python-swat no instalado. Ejecuta: pip install swat")
+
+    import uuid, pandas as _pd
+
+    host = os.getenv("CAS_HOST")
+    port = int(os.getenv("CAS_PORT", "8777"))
+    protocol = (os.getenv("CAS_PROTOCOL", "http") or "http").lower()
+    token = os.getenv("SAS_SERVICES_TOKEN") or os.getenv("BEARER_TOKEN")
+    user  = os.getenv("CAS_USER")
+    pwd   = os.getenv("CAS_PASSWORD")
+    ssl_ca = os.getenv("CAS_SSL_CA_LIST") or os.getenv("VIYA_CA_BUNDLE")
+
+    astore_name = os.getenv("CAS_ASTORE_NAME")
+    astore_lib  = os.getenv("CAS_ASTORE_CASLIB", "Public")
+    work_lib    = os.getenv("CAS_WORK_CASLIB", "Public")
+
+    if not (host and astore_name):
+        raise RuntimeError("CAS_HOST y CAS_ASTORE_NAME son obligatorios.")
+
+    conn = _swat.CAS(
+        host, port,
+        protocol=("http" if protocol == "http" else "https"),
+        token=token, username=user, password=pwd,
+        ssl_ca_list=ssl_ca
+    )
+
+    # subir 1 fila
+    df = _pd.DataFrame([row_dict])
+    tmp_in = f"inp_{uuid.uuid4().hex[:8]}"
+    tmp_out = f"out_{uuid.uuid4().hex[:8]}"
+    conn.upload_frame(df, casout={"name": tmp_in, "caslib": work_lib, "replace": True})
+
+    # score con ASTORE
+    conn.loadactionset("astore")
+    conn.astore.score(
+        rstore={"name": astore_name, "caslib": astore_lib},
+        table={"name": tmp_in, "caslib": work_lib},
+        casout={"name": tmp_out, "caslib": work_lib, "replace": True},
+        copyvars="ALL"
+    )
+
+    # descargar salida
+    out_df = conn.CASTable(tmp_out, caslib=work_lib).to_frame()
+
+    # limpieza (best-effort)
+    try: conn.table.dropTable(name=tmp_in, caslib=work_lib, quiet=True)
+    except Exception: pass
+    conn.terminate()
+
+    # extraer prob/label
+    prob, label = None, None
+    for cand in ["EM_EVENTPROBABILITY","P_BAD1","P_1","EM_PREDICTION"]:
+        if cand in out_df.columns:
+            try:
+                prob = float(out_df[cand].iloc[0])
+                break
+            except Exception:
+                pass
+    if prob is None:
+        for c in out_df.columns:
+            cu = c.upper()
+            if cu.startswith("P_") and (cu.endswith("1") or cu.endswith("BAD1")):
+                try:
+                    prob = float(out_df[c].iloc[0])
+                    break
+                except Exception:
+                    pass
+    for cand in ["EM_CLASSIFICATION","I_BAD","LABEL"]:
+        if cand in out_df.columns:
+            label = out_df[cand].iloc[0]
+            break
+    if label is None and prob is not None:
+        label = 1 if float(prob) >= float(threshold) else 0
+    return {"prob": prob, "label": label, "df": out_df}
 
 # =========================
 # App helpers
@@ -359,7 +444,6 @@ def _band_from_prob(prob, threshold):
     return "very_high"
 
 def _institutional_template(prob, threshold, row=None):
-    """Deterministic reply approved by the institution, one per band."""
     row = row or {}
     reason = (row.get("REASON") or row.get("_REASON_") or "").strip()
     loan = row.get("LOAN")
@@ -374,33 +458,27 @@ def _institutional_template(prob, threshold, row=None):
     band = _band_from_prob(prob, threshold)
 
     TEMPLATES_FIXED = {
-        "unknown": (
-            "technical",
+        "unknown": ("technical",
             "I couldn’t compute a reliable probability right now. Could you confirm a few details"
             f"{amount_txt} (e.g., Reason and Employment years)? I’ll recheck immediately."
         ),
-        "very_low": (
-            "approve_low",
+        "very_low": ("approve_low",
             "Thanks for the details! Based on your profile{reason}, you look **well positioned** for approval. "
             "I can proceed with the next steps (document upload and a quick ID check). Shall I continue?"
         ),
-        "near_low": (
-            "approve_borderline",
+        "near_low": ("approve_borderline",
             "You’re **close to our approval threshold**. We can submit as is, or strengthen the case "
             f"(smaller amount{amount_txt}, extra documents). Which do you prefer?"
         ),
-        "elevated": (
-            "cautionary",
+        "elevated": ("cautionary",
             "Your profile suggests **higher risk** right now. We can explore alternatives: a smaller amount"
             f"{amount_txt}, a longer term, or a guarantor. Would you like to try one together?"
         ),
-        "very_high": (
-            "decline_empatic",
+        "very_high": ("decline_empatic",
             "Thank you for your time. I know this isn’t the outcome you hoped for. We’re **unable to proceed** today. "
             "If you’d like, I can share practical steps to strengthen your profile and when to reapply."
         ),
     }
-
     tone, base = TEMPLATES_FIXED.get(band, TEMPLATES_FIXED["unknown"])
     base = base.replace("{reason}", reason_txt)
     return tone, base
@@ -414,11 +492,16 @@ with st.sidebar:
     debug = st.toggle("Debug mode", value=False, key="debug")
 
     st.markdown("---")
-    st.markdown("**Viya REST env**")
+    st.markdown("**Viya REST env (MAS)**")
     st.caption(f"VIYA_URL: {os.getenv('VIYA_URL') or '(not set)'}")
     st.caption(f"MAS_MODULE_ID: {os.getenv('MAS_MODULE_ID') or '(not set)'}")
     has_token = bool(os.getenv("BEARER_TOKEN") or os.getenv("SAS_SERVICES_TOKEN") or os.getenv("VIYA_USER"))
     st.caption(f"Auth: {'configured' if has_token else 'missing'}")
+
+    st.markdown("**CAS env (SWAT)**")
+    st.caption(f"CAS_HOST: {os.getenv('CAS_HOST') or '(not set)'}")
+    st.caption(f"CAS_ASTORE: {(os.getenv('CAS_ASTORE_CASLIB') or 'Public') + '.' + (os.getenv('CAS_ASTORE_NAME') or '(not set)')}")
+
     if st.button("Reload inputVar.json", key="reload_json_btn"):
         load_input_vars.clear()
         st.session_state.expected_cols = load_input_vars()
@@ -477,7 +560,7 @@ if can_translate and sas_path:
         expected_auto = extract_expected_inputs_from_sas(raw_code)
         st.session_state.cat_levels = parse_categorical_levels_from_sas(raw_code)
         st.session_state.cat_levels_ci = build_cat_levels_ci(st.session_state.cat_levels)
-        combined_inputs = sorted(set(expected_from_json or []) | set(expected_auto or []))  # FIX
+        combined_inputs = sorted(set(expected_from_json or []) | set(expected_auto or []))
         combined_inputs = [c for c in combined_inputs if c.upper() != "BAD"]
         score_fn, py_code, expected = compile_sas_score(
             raw_code, func_name="sas_score",
@@ -504,9 +587,16 @@ with st.expander("Show generated Python score code", expanded=False):
         st.info("Translate first to view the generated code.")
 
 # =========================
-# Tabs
+# Tabs (CAS agregado)
 # =========================
-tabs = st.tabs([f"Single case — {ENGINE_LABEL}", "Single case — Viya (REST)", "CSV batch", "Assistant", "Info"])
+tabs = st.tabs([
+    f"Single case — {ENGINE_LABEL}",
+    "Single case — Viya (REST)",
+    "Single case — CAS (SWAT)",
+    "CSV batch",
+    "Assistant",
+    "Info"
+])
 
 # ---- Single case — GitHub (Python) ----
 with tabs[0]:
@@ -662,8 +752,67 @@ with tabs[1]:
                 except Exception as e:
                     st.error(f"Viya REST error: {e}")
 
-# ---- CSV batch ----
+# ---- Single case — CAS (SWAT) ----
 with tabs[2]:
+    st.markdown("## 2) Provide inputs for CAS (SWAT)")
+    fields = st.session_state.expected_cols or list(sample_df.columns)
+    if not fields:
+        st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
+    row_cas = build_single_record_form(fields, sample_df, st.session_state.cat_levels_ci, key_prefix="cas_single")
+
+    st.markdown("## 3) Score on CAS (SWAT)")
+    do_cas = st.button("Score on CAS (SWAT)", use_container_width=True, key="btn_cas_single")
+
+    if do_cas:
+        copy_aliases_inplace_ci(row_cas, st.session_state.cat_levels_ci)
+        invalid = []
+        for key_ci, levels in st.session_state.cat_levels_ci.items():
+            base = key_ci.lstrip("_")
+            val = None
+            for k in row_cas.keys():
+                if k.lower() == key_ci or k.lower() == base:
+                    val = row_cas[k]; break
+            if levels and val is not None and str(val) not in levels:
+                invalid.append(f"{base.upper()}='{val}' (allowed: {', '.join(levels)})")
+        if invalid:
+            st.error("Invalid categorical values: " + "; ".join(invalid))
+        else:
+            missing_now = list_missing(fields, row_cas)
+            if missing_now:
+                st.error("Complete the required inputs before scoring: " + ", ".join(missing_now))
+            else:
+                try:
+                    # Preprocesado como en otros tabs: expande alias y normaliza tipos numéricos
+                    fields_full = list(fields)
+                    names = set(st.session_state.cat_levels_ci.keys()) | {f'_{f}' for f in FORCE_CAT} | set(FORCE_CAT)
+                    for nm in names:
+                        base = nm.lstrip("_")
+                        alias = f"_{base}"
+                        if base not in fields_full: fields_full.append(base)
+                        if alias not in fields_full: fields_full.append(alias)
+                    df_in = pd.DataFrame([row_cas]).reindex(columns=fields_full, fill_value=None)
+                    cat_fields_ci = {k.lstrip("_").lower() for k in st.session_state.cat_levels_ci.keys()} | set(FORCE_CAT)
+                    for col in df_in.columns:
+                        if col.lower() not in cat_fields_ci:
+                            df_in[col] = pd.to_numeric(df_in[col], errors="coerce").fillna(0.0)
+
+                    res = _score_row_via_cas(df_in.iloc[0].to_dict(), threshold=st.session_state["thr"])
+                    p, lbl = res["prob"], res["label"]
+                    if p is None:
+                        st.warning("No probability column found en la salida CAS. Revisá columnas del ASTORE.")
+                    else:
+                        st.success("CAS scoring done.")
+                    c1, c2 = st.columns(2)
+                    c1.metric("Probability of BAD (CAS)", f"{float(p):0.4f}" if p is not None else "—")
+                    c2.metric("Predicted label (CAS)", "1" if lbl == 1 else ("0" if lbl == 0 else "—"))
+                    if st.session_state.get("debug"):
+                        st.subheader("Debug — CAS scored head()")
+                        st.dataframe(res["df"].head(20))
+                except Exception as e:
+                    st.error(f"CAS (SWAT) error: {e}")
+
+# ---- CSV batch ----
+with tabs[3]:
     st.markdown("## Batch scoring")
     up = st.file_uploader("Upload a CSV with the input schema", type=["csv"], key="uploader_csv")
     if up is not None:
@@ -743,13 +892,12 @@ with tabs[2]:
             st.error(f"CSV error: {e}")
 
 # ---- Assistant (Conversational, English) ----
-with tabs[3]:
+with tabs[4]:
     st.markdown("## Conversational Assistant (English)")
     st.caption("Choose institutional reply only, or institutional reply refined by an LLM. No probabilities are disclosed to customers.")
 
     eng = st.radio("Engine", [ENGINE_LABEL, "Viya (REST)"], horizontal=True, key="asst_engine")
 
-    # Clear mode: institutional vs institutional + LLM
     resp_mode = st.radio(
         "Response mode",
         ["Institutional (template only)", "Institutional + LLM"],
@@ -816,10 +964,7 @@ with tabs[3]:
         if err:
             st.chat_message("assistant").markdown(f"**Issue:** {err}")
         else:
-            # 1) Institutional deterministic reply
             tone, base_reply = _institutional_template(prob, st.session_state["thr"], row_asst)
-
-            # 2) Optional LLM refinement
             final_reply = base_reply
             dbg = ""
             if use_llm:
@@ -844,7 +989,7 @@ with tabs[3]:
                 st.caption(f"LLM debug: {dbg}")
 
 # ---- Info ----
-with tabs[4]:
+with tabs[5]:
     st.markdown("## Info")
     sas_file = find_sas_score_file()
     st.write("- SAS score file:", f"`{sas_file}`" if sas_file else "_not found_")
