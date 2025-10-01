@@ -1,12 +1,11 @@
 # app.py
 # Real Time Scoring App (powered by SAS)
 
-import os, re, json, math, traceback, random
+import os, re, json, math, random
 import pandas as pd
 import streamlit as st
-from io import StringIO
 
-# LLM refinement wrapper
+# LLM refinement wrapper (ya creaste llm/assistant.py)
 from llm.assistant import refine_reply_with_llm
 
 # Tolerant translator mode
@@ -26,7 +25,7 @@ st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
 
 # =========================
-# Import translator (optional)
+# Optional translator import
 # =========================
 sct = None
 translator_import_error = None
@@ -348,17 +347,71 @@ def parse_mas_outputs(resp_json, threshold=0.5):
     return (p if p is not None else float("nan")), lbl
 
 # =========================
+# Institutional assistant helpers
+# =========================
+def _band_from_prob(prob, threshold):
+    if prob is None or (isinstance(prob, float) and (prob != prob)):
+        return "unknown"
+    p = float(prob)
+    if p < threshold * 0.6:            return "very_low"
+    if p < threshold:                  return "near_low"
+    if p < min(0.85, threshold + 0.2): return "elevated"
+    return "very_high"
+
+def _institutional_template(prob, threshold, row=None):
+    """Deterministic reply approved by the institution, one per band."""
+    row = row or {}
+    reason = (row.get("REASON") or row.get("_REASON_") or "").strip()
+    loan = row.get("LOAN")
+    amount_txt = ""
+    try:
+        if loan is not None and str(loan).strip() != "":
+            amount_txt = f" of {int(float(loan)):,}"
+    except Exception:
+        amount_txt = ""
+    reason_txt = f" for **{reason}**" if reason else ""
+
+    band = _band_from_prob(prob, threshold)
+
+    TEMPLATES_FIXED = {
+        "unknown": (
+            "technical",
+            "I couldn’t compute a reliable probability right now. Could you confirm a few details"
+            f"{amount_txt} (e.g., Reason and Employment years)? I’ll recheck immediately."
+        ),
+        "very_low": (
+            "approve_low",
+            "Thanks for the details! Based on your profile{reason}, you look **well positioned** for approval. "
+            "I can proceed with the next steps (document upload and a quick ID check). Shall I continue?"
+        ),
+        "near_low": (
+            "approve_borderline",
+            "You’re **close to our approval threshold**. We can submit as is, or strengthen the case "
+            f"(smaller amount{amount_txt}, extra documents). Which do you prefer?"
+        ),
+        "elevated": (
+            "cautionary",
+            "Your profile suggests **higher risk** right now. We can explore alternatives: a smaller amount"
+            f"{amount_txt}, a longer term, or a guarantor. Would you like to try one together?"
+        ),
+        "very_high": (
+            "decline_empatic",
+            "Thank you for your time. I know this isn’t the outcome you hoped for. We’re **unable to proceed** today. "
+            "If you’d like, I can share practical steps to strengthen your profile and when to reapply."
+        ),
+    }
+
+    tone, base = TEMPLATES_FIXED.get(band, TEMPLATES_FIXED["unknown"])
+    base = base.replace("{reason}", reason_txt)
+    return tone, base
+
+# =========================
 # Sidebar
 # =========================
 with st.sidebar:
     st.markdown("### Settings")
     thr = st.slider("Decision threshold (BAD=1)", 0.0, 1.0, 0.50, 0.01, key="thr")
     debug = st.toggle("Debug mode", value=False, key="debug")
-    # Assistant variety + LLM global toggles (claves únicas)
-    asst_mode = st.selectbox("Assistant variety", ["deterministic", "random", "random (no repeat)"], index=1, key="asst_mode_global")
-    st.session_state["asst_mode"] = asst_mode
-    use_llm_global = st.checkbox("Refine with LLM (global)", value=True, key="use_llm_global")
-    llm_temp_global = st.slider("LLM temperature (global)", 0.0, 1.0, 0.6, 0.05, key="llm_temp_global")
 
     st.markdown("---")
     st.markdown("**Viya REST env**")
@@ -654,14 +707,23 @@ with tabs[2]:
 # ---- Assistant (Conversational, English) ----
 with tabs[3]:
     st.markdown("## Conversational Assistant (English)")
-    st.caption("Enter customer attributes and pick the scoring engine. The assistant will suggest an empathetic reply based on the predicted risk (optionally refined by an LLM).")
+    st.caption("Choose institutional reply only, or institutional reply refined by an LLM. No probabilities are disclosed to customers.")
 
     eng = st.radio("Engine", [ENGINE_LABEL, "Viya (REST)"], horizontal=True, key="asst_engine")
 
-    # Local controls (visibles en la pestaña) con claves únicas
-    col_llm1, col_llm2 = st.columns([1,1])
-    use_llm = col_llm1.checkbox("Refine with LLM", value=st.session_state.get("use_llm_global", True), key="assistant_use_llm")
-    llm_temp = col_llm2.slider("LLM temperature", 0.0, 1.0, st.session_state.get("llm_temp_global", 0.6), 0.05, key="assistant_llm_temp")
+    # Clear mode: institutional vs institutional + LLM
+    resp_mode = st.radio(
+        "Response mode",
+        ["Institutional (template only)", "Institutional + LLM"],
+        index=0,
+        horizontal=True,
+        key="resp_mode"
+    )
+    use_llm = (resp_mode == "Institutional + LLM")
+    if use_llm:
+        col_llm1, col_llm2 = st.columns([1,1])
+        llm_temp = col_llm1.slider("LLM temperature", 0.0, 1.0, 0.6, 0.05, key="assistant_llm_temp")
+        col_llm2.caption(f"Model: {os.getenv('LLM_MODEL', 'gpt-4o-mini')} (set LLM_MODEL env var to change)")
 
     fields = st.session_state.expected_cols or list(sample_df.columns)
     if not fields:
@@ -709,108 +771,6 @@ with tabs[3]:
             except Exception as e:
                 return None, f"Viya REST error: {e}"
 
-    def _compose_empatic_response(prob, threshold, row=None):
-        """
-        Templates by probability band with variety modes:
-          - deterministic: rotation
-          - random: random choice
-          - random (no repeat): random avoiding last index per band
-        """
-        row = row or {}
-        reason = (row.get("REASON") or row.get("_REASON_") or "").strip()
-        loan = row.get("LOAN")
-        amount_txt = ""
-        try:
-            if loan is not None and str(loan).strip() != "":
-                amount_txt = f" of {int(float(loan)):,}"
-        except Exception:
-            amount_txt = ""
-        reason_txt = f" for **{reason}**" if reason else ""
-
-        if prob is None or (isinstance(prob, float) and (prob != prob)):
-            band = "unknown"
-        else:
-            p = float(prob)
-            if p < threshold * 0.6:
-                band = "very_low"
-            elif p < threshold:
-                band = "near_low"
-            elif p < min(0.85, threshold + 0.2):
-                band = "elevated"
-            else:
-                band = "very_high"
-
-        TEMPLATES = {
-            "unknown": [
-                ("technical", "I couldn’t compute a reliable probability right now. Could you confirm a few details "
-                              "(for example, Reason{amt} and Employment years)? I’ll recheck immediately.".replace("{amt}", amount_txt)),
-                ("technical", "I’m missing a couple of fields to score this case{amt}. If you can confirm them (e.g., Reason and LOAN), "
-                              "I’ll run the evaluation again right away.".replace("{amt}", amount_txt)),
-                ("technical", "Something seems off with the inputs{amt}. Please confirm the key values (like Reason and income/tenure) and I’ll try again."
-                              .replace("{amt}", amount_txt)),
-            ],
-            "very_low": [
-                ("approve_low", "Thanks for the details! Based on your profile{reason}, you look **well positioned** for approval. "
-                                "I can proceed with the application and outline the next steps (document upload and a quick ID check). "
-                                "Shall I continue?"),
-                ("approve_low", "Good news — your current profile{reason} indicates **low risk**. "
-                                "I can move forward and share the next steps for a smooth approval. Would you like me to proceed?"),
-                ("approve_low", "Everything looks solid{reason}. You’re **in great shape** for approval. "
-                                "I can continue with the application flow and timing. Is that okay with you?"),
-            ],
-            "near_low": [
-                ("approve_borderline", "Thanks for sharing those details. You’re **close to our approval threshold**. "
-                                       "We can submit as is, or strengthen the case (smaller amount{amt}, extra documents). Which do you prefer?"),
-                ("approve_borderline", "You’re near the line for approval. We can go ahead now, or improve the application "
-                                       "by adjusting the requested amount{amt} or adding supporting docs. What works best?"),
-                ("approve_borderline", "You’re almost there. If you’d like, we can optimize the request (e.g., tweak the amount{amt} or add proof of income). "
-                                       "Shall we try that?"),
-            ],
-            "elevated": [
-                ("cautionary", "I understand this is important. Right now your profile suggests **higher risk**. "
-                               "We can still explore alternatives: a smaller amount{amt}, a longer term, or a guarantor. Would you like to try one together?"),
-                ("cautionary", "At the moment, your risk score is above our comfort zone. "
-                               "We could reduce the requested amount{amt} or provide additional backing (docs/guarantor). Should we explore these options?"),
-                ("cautionary", "Your case is currently above our standard risk threshold. "
-                               "We can adjust conditions (e.g., lower amount{amt}) to improve your chances. Interested?"),
-            ],
-            "very_high": [
-                ("decline_empatic", "Thank you for your time. I know this isn’t the outcome you hoped for. "
-                                    "Right now we’re **unable to proceed** based on our criteria. "
-                                    "If you’d like, I can share **practical next steps** to strengthen your profile and when to reapply."),
-                ("decline_empatic", "I appreciate your patience. At this stage, we’re **not able to continue** under current policies. "
-                                    "I can provide concrete suggestions to improve your eligibility and a realistic timeline to try again."),
-                ("decline_empatic", "I understand this is disappointing. We’re **unable to move forward** today. "
-                                    "Would guidance on improving your credit profile and reapplication timing be helpful?"),
-            ],
-        }
-
-        def personalize(txt: str) -> str:
-            return txt.replace("{reason}", reason_txt).replace("{amt}", amount_txt)
-
-        opts = TEMPLATES[band]
-        mode = st.session_state.get("asst_mode", "random")
-
-        if mode == "deterministic":
-            key = f"tmpl_idx_{band}"
-            idx = st.session_state.get(key, 0) % len(opts)
-            st.session_state[key] = idx + 1
-        elif mode == "random (no repeat)":
-            last_key = f"last_idx_{band}"
-            last = st.session_state.get(last_key, None)
-            idx = random.randrange(len(opts))
-            if last is not None and len(opts) > 1:
-                tries = 0
-                while idx == last and tries < 5:
-                    idx = random.randrange(len(opts))
-                    tries += 1
-            st.session_state[last_key] = idx
-        else:  # "random"
-            idx = random.randrange(len(opts))
-
-        tone, base_txt = opts[idx]
-        return tone, personalize(base_txt)
-
     st.markdown("### Run assistant")
     if st.button("Get suggested reply", type="primary", use_container_width=True, key="assistant_btn"):
         prob, err = _score_one(dict(row_asst))
@@ -818,29 +778,31 @@ with tabs[3]:
         if err:
             st.chat_message("assistant").markdown(f"**Issue:** {err}")
         else:
-            tone, reply = _compose_empatic_response(prob, st.session_state["thr"], row_asst)
+            # 1) Institutional deterministic reply
+            tone, base_reply = _institutional_template(prob, st.session_state["thr"], row_asst)
 
-            # LLM refinement (optional; usa toggles locales)
-            refined = reply
+            # 2) Optional LLM refinement
+            final_reply = base_reply
             dbg = ""
             if use_llm:
-                refined, dbg = refine_reply_with_llm(
-                    base_reply=reply,
+                final_reply, dbg = refine_reply_with_llm(
+                    base_reply=base_reply,
                     prob=prob,
                     threshold=st.session_state["thr"],
                     row=row_asst,
-                    temperature=llm_temp,
+                    temperature=llm_temp if 'llm_temp' in locals() else 0.6,
                     model=os.getenv("LLM_MODEL", "gpt-4o-mini")
                 )
 
             pretty_p = "—" if prob is None or pd.isna(prob) else f"{prob:0.4f}"
+
             st.chat_message("assistant").markdown(
                 f"**Predicted probability (BAD):** {pretty_p}\n\n"
-                f"**Base template:**\n\n{reply}\n\n"
-                + (f"**LLM refined:**\n\n{refined}\n\n" if use_llm else "")
+                f"**Institutional (template):**\n\n{base_reply}\n\n"
+                + (f"**Refined (LLM):**\n\n{final_reply}\n\n" if use_llm else "")
                 + f"_Tone: {tone}; Threshold: {st.session_state['thr']:0.2f}_"
             )
-            if st.session_state["debug"] and use_llm:
+            if st.session_state.get("debug") and use_llm:
                 st.caption(f"LLM debug: {dbg}")
 
 # ---- Info ----
