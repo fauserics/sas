@@ -1,4 +1,21 @@
 # en la VM
+python - <<'PY'
+import os, swat
+c = swat.CAS(os.environ["CAS_HOST"], int(os.getenv("CAS_PORT")),
+             protocol=os.getenv("CAS_PROTOCOL"),
+             token=os.getenv("SAS_SERVICES_TOKEN"),
+             username=os.getenv("CAS_USER"), password=os.getenv("CAS_PASSWORD"),
+             ssl_ca_list=os.getenv("CAS_SSL_CA_LIST"))
+print("Server OK:", c.serverstatus().get('server',{}).get('version'))
+c.loadactionset("astore")
+print("RStores en caslib Public:")
+print(c.astore.listRStore(caslib=os.getenv("CAS_ASTORE_CASLIB","Public")))
+c.terminate()
+PY
+
+
+
+
 python3 -m venv ~/.venvs/casapp
 source ~/.venvs/casapp/bin/activate
 pip install --upgrade pip
