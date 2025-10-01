@@ -1,3 +1,8 @@
+ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 8501:127.0.0.1:8501 cloud-user@<IP_VM>
+
+
+
+
 curl -sSf http://127.0.0.1:8501/healthz && echo "UI OK" || echo "UI NO RESPONDE"
 
 
