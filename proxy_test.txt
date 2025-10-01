@@ -1,4 +1,24 @@
 #VIYA SWAT
+
+python3 - <<'PY'
+import os, sys
+try:
+    import swat
+    print("OK: SWAT", swat.__version__)
+except Exception as e:
+    print("ERROR: SWAT no importa:", e); sys.exit(1)
+
+print("CAS_HOST =", os.getenv("CAS_HOST"))
+print("CAS_PORT =", os.getenv("CAS_PORT"))
+print("CAS_PROTOCOL =", os.getenv("CAS_PROTOCOL"))
+print("CAS_ASTORE_NAME =", os.getenv("CAS_ASTORE_NAME"))
+print("CAS_ASTORE_CASLIB =", os.getenv("CAS_ASTORE_CASLIB"))
+print("CAS_WORK_CASLIB =", os.getenv("CAS_WORK_CASLIB"))
+print("Auth (token) =", "YES" if os.getenv("SAS_SERVICES_TOKEN") or os.getenv("BEARER_TOKEN") else "NO")
+print("Auth (user/pass) =", "YES" if os.getenv("CAS_USER") and os.getenv("CAS_PASSWORD") else "NO")
+PY
+
+
 export CAS_HOST="<host_de_CAS>"
 export CAS_PORT="8777"            # o 5570
 export CAS_PROTOCOL="http"        # o "https"
