@@ -1,8 +1,5 @@
 # app.py
 # Real Time Scoring App (powered by SAS)
-# Engines:
-#  1) GitHub (Python): translate SAS DATA step score code -> Python and run locally
-#  2) Viya REST: call MAS scoring endpoint
 
 import os
 import re
@@ -11,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from sas_code_translator import compile_sas_score, score_dataframe as score_df_local
-from viya_mas_client import score_row_via_rest  # needs VIYA_URL, MAS_MODULE_ID, token/creds
+from viya_mas_client import score_row_via_rest  # necesita VIYA_URL, MAS_MODULE_ID, token/creds
 
 APP_TITLE = "Real Time Scoring App (powered by SAS)"
 ENGINE_LABEL = "GitHub (Python)"
@@ -67,15 +64,23 @@ def _sanitize_var(v: str) -> str:
     return v
 
 def extract_expected_inputs_from_sas(code: str) -> list[str]:
-    # Detecta los requeridos del bloque missing(...)
     miss_names = set(_sanitize_var(x) for x in re.findall(r"missing\(\s*([A-Za-z_][\w']*)\s*\)", code, flags=re.I))
-    # Si se usa REASON en select/when agregarla
     if re.search(r"\bREASON\b", code, flags=re.I):
         miss_names.add("REASON")
-    # Filtrar temporales/outputs
     drop_prefixes = ("_", "EM_", "P_", "I_", "va__d__E_")
     keep = [n for n in miss_names if n and not n.upper().startswith(drop_prefixes)]
     return sorted(keep, key=str.upper)
+
+def parse_categorical_levels_from_sas(code: str) -> dict[str, list[str]]:
+    """Detecta bloques select( VAR ); when('A') ...; -> {'VAR': ['A','B',...]}"""
+    cat = {}
+    for m in re.finditer(r"select\s*\(\s*([A-Za-z_]\w*)\s*\)\s*;(.+?)end\s*;", code, flags=re.I|re.S):
+        var = m.group(1).strip()
+        block = m.group(2)
+        levels = re.findall(r"when\s*\(\s*'([^']+)'\s*\)", block, flags=re.I)
+        if levels:
+            cat[var] = sorted(list(dict.fromkeys(levels)))
+    return cat
 
 @st.cache_data
 def load_sample_df(expected_cols: list[str]) -> pd.DataFrame:
@@ -113,39 +118,23 @@ def parse_mas_outputs(resp_json: dict, threshold: float = 0.5) -> tuple[float, i
         lbl = (1 if (p is not None and p >= threshold) else 0)
     return (p if p is not None else float("nan")), lbl
 
-def build_single_record_form(fields: list[str], sample: pd.DataFrame, key_prefix: str) -> dict:
-    defaults = {}
-    if not sample.empty:
-        for c in fields:
-            if c in sample.columns:
-                s = sample[c]
-                if pd.api.types.is_numeric_dtype(s):
-                    defaults[c] = float(s.dropna().median()) if s.notna().any() else 0.0
-                else:
-                    defaults[c] = str(s.dropna().mode().iloc[0]) if s.notna().any() else ""
-            else:
-                defaults[c] = 0.0
-    else:
-        for c in fields:
-            defaults[c] = 0.0
-
-    left, right = st.columns(2)
+def build_single_record_form(fields: list[str], sample: pd.DataFrame, cat_levels: dict[str, list[str]], key_prefix: str) -> dict:
+    """Fuerza number_input para no-categóricas y selectbox con opciones SAS para categóricas."""
     row = {}
+    left, right = st.columns(2)
     for i, c in enumerate(fields):
         tgt = left if i % 2 == 0 else right
         key = f"{key_prefix}__{c}"
-        if c in sample.columns and pd.api.types.is_numeric_dtype(sample[c]):
-            row[c] = tgt.number_input(c, value=float(defaults.get(c, 0.0)), key=key)
+        if c in cat_levels and cat_levels[c]:
+            # opciones detectadas del SAS
+            row[c] = tgt.selectbox(c, cat_levels[c], index=0, key=key)
         else:
-            opts = []
-            if c in sample.columns and not sample.empty:
-                vals = sample[c].dropna().astype(str).unique().tolist()
-                if 1 <= len(vals) <= 50:
-                    opts = sorted(vals)
-            if opts:
-                row[c] = tgt.selectbox(c, opts, index=0, key=key)
-            else:
-                row[c] = tgt.text_input(c, value=str(defaults.get(c, "")), key=key)
+            # numérico
+            default = 0.0
+            if c in sample.columns and pd.api.types.is_numeric_dtype(sample[c]):
+                s = sample[c]
+                default = float(s.dropna().median()) if s.notna().any() else 0.0
+            row[c] = tgt.number_input(c, value=default, key=key)
     return row
 
 def is_ds2_astore(code: str) -> bool:
@@ -192,6 +181,8 @@ if "score_py" not in st.session_state:
     st.session_state.score_py = ""
 if "expected_cols" not in st.session_state:
     st.session_state.expected_cols = expected_from_json
+if "cat_levels" not in st.session_state:
+    st.session_state.cat_levels = {}
 
 # ---------- translation ----------
 st.markdown("## 1) Translate SAS score code to Python")
@@ -211,6 +202,7 @@ if can_translate and sas_path:
     else:
         try:
             expected_auto_for_info = extract_expected_inputs_from_sas(raw_code)
+            st.session_state.cat_levels = parse_categorical_levels_from_sas(raw_code)  # <-- NUEVO
             # Unión: JSON ∪ requeridos del SAS
             combined_inputs = sorted(set((expected_from_json or [])) | set(expected_auto_for_info or []))
             score_fn, py_code, expected = compile_sas_score(
@@ -246,7 +238,7 @@ with tabs[0]:
     fields = st.session_state.expected_cols or list(sample_df.columns)
     if not fields:
         st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
-    row = build_single_record_form(fields, sample_df, key_prefix="gh_single")
+    row = build_single_record_form(fields, sample_df, st.session_state.cat_levels, key_prefix="gh_single")
 
     st.markdown(f"## 3) Score in {ENGINE_LABEL}")
     do_local = st.button(f"Score in {ENGINE_LABEL}", type="primary", use_container_width=True, key="btn_gh_single",
@@ -260,6 +252,12 @@ with tabs[0]:
         else:
             try:
                 df_in = pd.DataFrame([row]).reindex(columns=fields, fill_value=None)
+                # Cast numéricos: todo lo que NO sea categórico detectado -> float
+                cat_fields = set(st.session_state.cat_levels.keys())
+                for col in df_in.columns:
+                    if col not in cat_fields:
+                        df_in[col] = pd.to_numeric(df_in[col], errors="coerce")
+                # Score
                 scored = score_df_local(st.session_state.score_fn, df_in, threshold=thr)
                 p_raw = scored["prob_BAD"].iloc[0] if "prob_BAD" in scored else float("nan")
                 lbl_raw = scored["label_BAD"].iloc[0] if "label_BAD" in scored else None
@@ -270,7 +268,7 @@ with tabs[0]:
                     except Exception: lbl = None
 
                 if p is None:
-                    st.warning("Probability is NaN (likely missing required inputs for the SAS score). Check the form/inputVar.json.")
+                    st.warning("Probability is NaN. Check that categorical values (e.g., REASON) match SAS levels and numeric fields are filled.")
                 else:
                     st.success(f"Scored in {ENGINE_LABEL}.")
                 c1, c2 = st.columns(2)
@@ -286,13 +284,12 @@ with tabs[1]:
     fields = st.session_state.expected_cols or list(sample_df.columns)
     if not fields:
         st.info("No input schema found. Add score/inputVar.json or a data/sample.csv.")
-    row_rest = build_single_record_form(fields, sample_df, key_prefix="viya_single")
+    row_rest = build_single_record_form(fields, sample_df, st.session_state.cat_levels, key_prefix="viya_single")
 
     st.markdown("## 3) Score on Viya (REST)")
     do_rest  = st.button("Score on Viya (REST)", use_container_width=True, key="btn_viya_single")
 
     if do_rest:
-        # Chequeo de faltantes (opcional, para consistencia)
         missing_now = list_missing(fields, row_rest)
         if missing_now:
             st.error("Complete the required inputs before scoring: " + ", ".join(missing_now))
@@ -321,6 +318,11 @@ with tabs[2]:
                 if c not in df.columns:
                     df[c] = None
             df = df[fields]
+            # cast numéricos
+            cat_fields = set(st.session_state.cat_levels.keys())
+            for col in df.columns:
+                if col not in cat_fields:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
 
             c1, c2 = st.columns(2)
             do_local_csv = c1.button(f"Score CSV in {ENGINE_LABEL}",
@@ -328,7 +330,6 @@ with tabs[2]:
             do_rest_csv  = c2.button("Score CSV on Viya (REST)", use_container_width=True, key="btn_viya_csv")
 
             if do_local_csv:
-                # Chequeo simple: columnas presentes (valores faltantes se permiten en batch)
                 try:
                     scored = score_df_local(st.session_state.score_fn, df, threshold=thr)
                     st.success(f"Scored in {ENGINE_LABEL}: {len(scored)} rows.")
@@ -383,6 +384,9 @@ with tabs[3]:
     if expected_auto_for_info:
         with st.expander("Inputs detected from SAS (missing(...))"):
             st.code("\n".join(expected_auto_for_info))
+    if st.session_state.cat_levels:
+        with st.expander("Categorical levels detected from SAS (select/when)"):
+            st.json(st.session_state.cat_levels)
     st.write("- Current expected inputs (union JSON ∪ SAS):", len(st.session_state.expected_cols))
     if st.session_state.expected_cols:
         with st.expander("Show expected input fields"):
