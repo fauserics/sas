@@ -1,3 +1,21 @@
+cd /home/cloud-user/real-time-scoring
+mkdir -p score
+cat > score/inputVar.json <<'JSON'
+[
+  {"name":"CLAGE"},
+  {"name":"CLNO"},
+  {"name":"DEBTINC"},
+  {"name":"DELINQ"},
+  {"name":"DEROG"},
+  {"name":"JOB"},
+  {"name":"LOAN"},
+  {"name":"MORTDUE"},
+  {"name":"NINQ"},
+  {"name":"REASON"},
+  {"name":"VALUE"},
+  {"name":"YOJ"}
+]
+JSON
 
 
 
