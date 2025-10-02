@@ -1,3 +1,22 @@
+
+# Variables (reemplazá user/pass)
+export VIYA_USER="<tu_usuario>"
+export VIYA_PASSWORD="<tu_password>"
+export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
+
+export BEARER_TOKEN=$(
+  curl -s --cacert "$HOME/viya-full.pem" \
+    -u 'sas.ec:' \
+    -d "grant_type=password&username=${VIYA_USER}&password=${VIYA_PASSWORD}&scope=uaa.user" \
+    "$VIYA_URL/SASLogon/oauth/token" | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])'
+)
+test -n "$BEARER_TOKEN" && echo "TOKEN OK" || echo "NO TOKEN"
+
+
+
+
+
+
 # Muestra aud/exp del JWT para ver si está vencido
 python - <<'PY'
 import os,sys,time,base64,json
