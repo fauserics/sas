@@ -1,3 +1,14 @@
+# sacar la cadena de certificados del endpoint de Viya
+openssl s_client -showcerts \
+  -servername disco-a20237-rg.gelenable.sas.com \
+  -connect disco-a20237-rg.gelenable.sas.com:443 </dev/null 2>/dev/null \
+| awk '/BEGIN CERTIFICATE/{p=1} p; /END CERTIFICATE/{print ""; p=0}' > ~/viya-ca.pem
+
+
+
+
+
+
 cd /home/cloud-user/real-time-scoring
 mkdir -p score
 export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
