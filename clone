@@ -1,3 +1,13 @@
+cd /home/cloud-user/real-time-scoring
+unset BEARER_TOKEN SAS_SERVICES_TOKEN TOKEN
+./run_app.sh
+
+
+
+
+
+
+
 # Variables base (ajustá si tu CA bundle es otro)
 export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
 export REQUESTS_CA_BUNDLE="$HOME/viya-full.pem"
