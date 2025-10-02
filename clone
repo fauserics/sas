@@ -1,4 +1,70 @@
 cd /home/cloud-user/real-time-scoring
+
+# 1) Backup
+cp app.py app.py.bak.$(date +%Y%m%d-%H%M%S)
+
+# 2) Inserta fallback de clase tras cada parse_mas_outputs(...)
+python - <<'PY'
+import io, re
+
+p = "app.py"
+s = open(p, "r", encoding="utf-8").read()
+lines = s.splitlines(True)
+
+needle = 'p, lbl = parse_mas_outputs(resp, threshold=st.session_state["thr"])'
+inserted = 0
+
+def make_block(indent):
+    b = []
+    b.append(indent + "# fallback: derive label if MAS did not return class\n")
+    b.append(indent + "try:\n")
+    b.append(indent + "    _p = float(p)\n")
+    b.append(indent + "    if lbl is None and not (_p != _p):\n")
+    b.append(indent + '        lbl = 1 if _p >= float(st.session_state["thr"]) else 0\n')
+    b.append(indent + "except Exception:\n")
+    b.append(indent + "    pass\n")
+    return b
+
+out = []
+i = 0
+while i < len(lines):
+    out.append(lines[i])
+    if needle in lines[i]:
+        # indentación del comienzo de la línea
+        indent = re.match(r"^(\s*)", lines[i]).group(1)
+        # evitar duplicar si ya está el comentario en la siguiente(s)
+        nxt = "".join(lines[i+1:i+6])
+        if "# fallback: derive label" not in nxt:
+            out.extend(make_block(indent))
+            inserted += 1
+    i += 1
+
+open(p, "w", encoding="utf-8").write("".join(out))
+print(f"OK: se insertó fallback en {inserted} lugar(es).")
+PY
+
+# 3) Relanzá la app
+./run_app.sh
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+cd /home/cloud-user/real-time-scoring
 cp app.py app.py.bak.$(date +%Y%m%d-%H%M%S)
 
 python - <<'PY'
