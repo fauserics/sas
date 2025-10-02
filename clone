@@ -1,3 +1,29 @@
+# Activá tu venv
+source ~/.venvs/casapp/bin/activate 2>/dev/null || true
+
+# (1a) Ruta del bundle que usa requests/certifi
+CACERT=$(python - <<'PY'
+import certifi; print(certifi.where())
+PY
+)
+
+# (1b) Cadena completa del server de Viya
+openssl s_client -showcerts \
+  -servername disco-a20237-rg.gelenable.sas.com \
+  -connect disco-a20237-rg.gelenable.sas.com:443 </dev/null 2>/dev/null \
+| awk '/BEGIN CERTIFICATE/{p=1} p; /END CERTIFICATE/{print ""; p=0}' > ~/viya-chain.pem
+
+# (1c) Bundle final = certifi + cadena de Viya
+cat "$CACERT" ~/viya-chain.pem > ~/viya-full.pem
+
+
+
+
+
+
+
+
+
 import sys,json
 m=json.load(sys.stdin); ins=(m.get("signature") or {}).get("inputs") or []
 print(json.dumps([{"name":i} for i in ins if "name" in i], indent=2))
