@@ -1,3 +1,44 @@
+
+cd /home/cloud-user/real-time-scoring
+cp "$(ls -t app.py.bak.* | head -1)" app.py
+
+
+cat >> app.py <<'PY'
+
+# --- Safe add-on: derive label from probability when MAS doesn't return class ---
+def __rt_fix_parse_label__(resp_json, threshold=0.5):
+    # Llamamos a la función original y luego, si falta la clase, la derivamos.
+    try:
+        p, lbl = parse_mas_outputs(resp_json, threshold=threshold)
+    except Exception:
+        # fallback ultra-simple si algo raro pasa con la firma original
+        p = (resp_json.get("EM_EVENTPROBABILITY")
+             or resp_json.get("probability")
+             or resp_json.get("score"))
+        try:
+            p = float(p)
+        except Exception:
+            p = float("nan")
+        lbl = None
+
+    # Si no vino etiqueta, la derivamos por umbral
+    try:
+        import pandas as _pd
+        if (lbl is None or lbl == "" or (isinstance(lbl, float) and _pd.isna(lbl))) and (p is not None and not (isinstance(p, float) and _pd.isna(p))):
+            lbl = 1 if float(p) >= float(threshold) else 0
+    except Exception:
+        pass
+
+    return p, lbl
+
+# Reemplazamos la referencia por el wrapper (no se borra la original)
+parse_mas_outputs = __rt_fix_parse_label__
+PY
+
+
+
+
+
 cd /home/cloud-user/real-time-scoring
 
 # 1) Backup con timestamp
