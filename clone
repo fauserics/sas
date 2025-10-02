@@ -1,3 +1,26 @@
+
+cd /home/cloud-user/real-time-scoring
+# (si tenés venv) 
+source ~/.venvs/casapp/bin/activate 2>/dev/null || true
+
+# Limpio cosas que confunden a viya_mas_client
+unset VIYA_USER VIYA_PASSWORD SAS_USERNAME SAS_PASSWORD
+
+# Seteo solo lo esencial (ajustá si tu CA bundle es otro)
+export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
+export MAS_MODULE_ID="gradient_boosting__interactive-m"
+export REQUESTS_CA_BUNDLE="$HOME/viya-full.pem"
+export VIYA_CA_BUNDLE="$HOME/viya-full.pem"
+export NO_PROXY="disco-a20237-rg.gelenable.sas.com,.gelenable.sas.com,localhost,127.0.0.1"
+export HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy=
+
+
+
+
+
+
+
+
 cd /home/cloud-user/real-time-scoring
 
 # Usá exactamente las env que acabás de probar
