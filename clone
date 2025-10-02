@@ -1,4 +1,13 @@
 
+mkdir -p data
+cat > data/sample.csv <<'CSV'
+CLAGE,CLNO,DEBTINC,DELINQ,DEROG,JOB,LOAN,MORTDUE,NINQ,REASON,VALUE,YOJ
+94.3,9,33.1,0,0,Office,1100,25860,1,HomeImp,39025,10.5
+CSV
+
+
+
+
 cd /home/cloud-user/real-time-scoring
 mkdir -p score
 cat > score/inputVar.json <<'JSON'
