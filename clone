@@ -1,3 +1,19 @@
+# en la VM
+cd /home/cloud-user
+git clone https://github.com/fauseric/sas.git rt-src
+
+# copiar el traductor al proyecto actual
+cp -n rt-src/sas_code_translator.py /home/cloud-user/real-time-scoring/ \
+  || find rt-src -maxdepth 3 -name 'sas_code_translator.py' -exec cp -n {} /home/cloud-user/real-time-scoring/ \;
+
+# (opcional) si el repo trae llm/assistant.py y lo querés igual al repo:
+mkdir -p /home/cloud-user/real-time-scoring/llm
+cp -n rt-src/llm/assistant.py /home/cloud-user/real-time-scoring/llm/ 2>/dev/null || true
+
+
+
+
+
 cd /home/cloud-user/real-time-scoring
 source ~/.venvs/casapp/bin/activate 2>/dev/null || true
 
