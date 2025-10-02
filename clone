@@ -1,3 +1,38 @@
+# (a) Detectar el bundle del sistema (RHEL/Alma/Rocky vs Debian/Ubuntu)
+if [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then CAB=/etc/pki/tls/certs/ca-bundle.crt; else CAB=/etc/ssl/certs/ca-certificates.crt; fi
+echo "CAB=$CAB"
+
+# (b) Extraer la **cadena** que entrega tu endpoint (server + intermedias + raíz)
+openssl s_client -showcerts \
+  -servername disco-a20237-rg.gelenable.sas.com \
+  -connect   disco-a20237-rg.gelenable.sas.com:443 </dev/null 2>/dev/null \
+| awk '/BEGIN CERTIFICATE/{p=1} p; /END CERTIFICATE/{print ""; p=0}' > ~/viya-chain-full.pem
+
+# (c) Quedarnos SOLO con las **CAs** (excluir el primer cert, que es el del servidor)
+awk 'BEGIN{n=0} /BEGIN CERTIFICATE/{n++; if(n>1) p=1} p; /END CERTIFICATE/{if(n>1){print ""; p=0}}' \
+  ~/viya-chain-full.pem > ~/viya-ca-only.pem
+
+# (d) Bundle final = CA del sistema + CA(s) del endpoint
+cat "$CAB" ~/viya-ca-only.pem > ~/viya-full.pem
+
+
+export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
+export REQUESTS_CA_BUNDLE="$HOME/viya-full.pem"
+export VIYA_CA_BUNDLE="$HOME/viya-full.pem"
+export NO_PROXY="disco-a20237-rg.gelenable.sas.com,.gelenable.sas.com,localhost,127.0.0.1"
+export HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy=
+
+python - <<'PY'
+import os,requests
+u=os.environ["VIYA_URL"].rstrip("/")+"/SASLogon/login"
+r=requests.get(u, timeout=10, verify=os.environ["REQUESTS_CA_BUNDLE"])
+print("SASLogon:", r.status_code)
+PY
+
+
+
+
+
 curl -s -m 10 --cacert "$HOME/viya-full.pem" \
   -H "Authorization: Bearer $BEARER_TOKEN" \
   "$VIYA_URL/microanalyticScore/modules?limit=1" -w "\nHTTP %{http_code}\n"
