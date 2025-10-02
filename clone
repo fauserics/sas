@@ -1,3 +1,16 @@
+# 1a) Ruta del bundle de certifi (el que usa requests)
+python - <<'PY'
+import certifi,sys; print(certifi.where())
+PY
+
+
+
+
+
+
+
+
+
 # sacar la cadena de certificados del endpoint de Viya
 openssl s_client -showcerts \
   -servername disco-a20237-rg.gelenable.sas.com \
