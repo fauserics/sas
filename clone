@@ -1,3 +1,17 @@
+cd /home/cloud-user/real-time-scoring
+curl -L -o sas_code_translator.py \
+  https://raw.githubusercontent.com/fauseric/sas/main/sas_code_translator.py
+
+mkdir -p data
+curl -L -o data/hmeq.csv \
+  https://raw.githubusercontent.com/fauseric/sas/main/data/hmeq.csv
+
+
+
+
+
+
+
 cd /home/cloud-user
 unset SSH_ASKPASS GIT_ASKPASS
 git config --global core.askPass ""
