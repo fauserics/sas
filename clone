@@ -1,3 +1,17 @@
+# Estás en /home/cloud-user/real-time-scoring
+echo "VIYA_URL=$VIYA_URL"
+echo "MAS_MODULE_ID=$MAS_MODULE_ID"
+echo "BEARER_TOKEN prefix: ${BEARER_TOKEN:0:20}..."
+echo "REQUESTS_CA_BUNDLE=$REQUESTS_CA_BUNDLE"
+
+# Prueba MAS con EXACTAMENTE esas envs
+curl -s -m 10 --cacert "$REQUESTS_CA_BUNDLE" \
+  -H "Authorization: Bearer $BEARER_TOKEN" \
+  "$VIYA_URL/microanalyticScore/modules?limit=1" -w "\nHTTP %{http_code}\n"
+
+
+
+
 
 mkdir -p data
 cat > data/sample.csv <<'CSV'
