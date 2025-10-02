@@ -1,3 +1,15 @@
+cd /home/cloud-user
+unset SSH_ASKPASS GIT_ASKPASS
+git config --global core.askPass ""
+git config --global credential.helper ""
+export GIT_TERMINAL_PROMPT=1
+
+git clone https://github.com/fauseric/sas.git rt-src
+
+
+
+
+
 # en la VM
 cd /home/cloud-user
 git clone https://github.com/fauseric/sas.git rt-src
