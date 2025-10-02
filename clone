@@ -1,3 +1,153 @@
+#!/usr/bin/env bash
+# run_app.sh — levanta la app con envs de Viya bien seteadas y token robusto.
+set -euo pipefail
+
+### ── CONFIG BÁSICA (editá si querés) ──────────────────────────────────────────
+APP_DIR="${APP_DIR:-/home/cloud-user/real-time-scoring}"
+VIYA_URL="${VIYA_URL:-https://disco-a20237-rg.gelenable.sas.com}"
+MAS_MODULE_ID="${MAS_MODULE_ID:-gradient_boosting__interactive-m}"
+REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-$HOME/viya-full.pem}"
+VIYA_CA_BUNDLE="${VIYA_CA_BUNDLE:-$REQUESTS_CA_BUNDLE}"
+
+# Bind/port de Streamlit (podés cambiarlos con: BIND=0.0.0.0 PORT=8501 ./run_app.sh)
+BIND="${BIND:-127.0.0.1}"
+PORT="${PORT:-8501}"
+
+### ── ENTORNO PYTHON (opcional) ────────────────────────────────────────────────
+if [ -d "$HOME/.venvs/casapp" ]; then
+  # venv sugerida
+  # shellcheck disable=SC1091
+  source "$HOME/.venvs/casapp/bin/activate"
+elif [ -d "$APP_DIR/venv" ]; then
+  # shellcheck disable=SC1091
+  source "$APP_DIR/venv/bin/activate"
+fi
+
+### ── CHEQUEOS RÁPIDOS ─────────────────────────────────────────────────────────
+cd "$APP_DIR"
+[ -f app.py ] || { echo "❌ No encuentro app.py en $APP_DIR"; exit 1; }
+[ -f "$REQUESTS_CA_BUNDLE" ] || { echo "❌ No encuentro CA bundle: $REQUESTS_CA_BUNDLE"; exit 1; }
+
+# Resolver host de Viya para NO_PROXY
+VIYA_HOST="${VIYA_URL#*://}"; VIYA_HOST="${VIYA_HOST%%/*}"
+
+# Limpiar proxies y setear NO_PROXY
+export NO_PROXY="$VIYA_HOST,.${VIYA_HOST#*.},localhost,127.0.0.1"
+export HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy=
+export REQUESTS_CA_BUNDLE VIYA_CA_BUNDLE VIYA_URL MAS_MODULE_ID
+
+### ── TOKEN: usar el que haya o generarlo ──────────────────────────────────────
+pick_token() {
+  # 1) Si ya está en env, usarlo
+  if [ -n "${BEARER_TOKEN:-}" ]; then echo "$BEARER_TOKEN"; return; fi
+  if [ -n "${SAS_SERVICES_TOKEN:-}" ]; then echo "$SAS_SERVICES_TOKEN"; return; fi
+  if [ -n "${TOKEN:-}" ]; then echo "$TOKEN"; return; fi
+  # 2) Si hay token.txt, usarlo
+  if [ -s "$HOME/token.txt" ]; then cat "$HOME/token.txt"; return; fi
+  # 3) Si hay credenciales, pedir uno por password grant
+  if [ -n "${VIYA_USER:-}" ] && [ -n "${VIYA_PASSWORD:-}" ]; then
+    curl -s --cacert "$REQUESTS_CA_BUNDLE" -u 'sas.ec:' \
+      -d "grant_type=password&username=${VIYA_USER}&password=${VIYA_PASSWORD}&scope=uaa.user" \
+      "$VIYA_URL/SASLogon/oauth/token" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])'
+    return
+  fi
+  echo ""
+}
+
+TOK="$(pick_token || true)"
+if [ -z "$TOK" ]; then
+  echo "❌ No hay token. Definí BEARER_TOKEN o SAS_SERVICES_TOKEN o TOKEN,";
+  echo "   o exportá VIYA_USER y VIYA_PASSWORD para que el script lo obtenga."
+  exit 1
+fi
+
+# Exportarlo para la app y librerías
+export BEARER_TOKEN="$TOK"
+export SAS_SERVICES_TOKEN="$TOK"
+export TOKEN="$TOK"
+
+# Mostrar resumen (sin filtrar secretos al log)
+echo "────────────────────────────────────────────────────────"
+echo "Viya URL      : $VIYA_URL"
+echo "MAS MODULE    : $MAS_MODULE_ID"
+echo "CA bundle     : $REQUESTS_CA_BUNDLE"
+echo "NO_PROXY      : $NO_PROXY"
+echo "Token prefix  : ${TOK:0:16}…"
+echo "App dir       : $APP_DIR"
+echo "Bind/Port     : $BIND:$PORT"
+echo "────────────────────────────────────────────────────────"
+
+### ── PREFLIGHT a MAS (debe dar HTTP 200) ──────────────────────────────────────
+set +e
+HTTP_CODE="$(curl -s -m 10 --cacert "$REQUESTS_CA_BUNDLE" \
+  -H "Authorization: Bearer $BEARER_TOKEN" \
+  "$VIYA_URL/microanalyticScore/modules?limit=1" -o /dev/null -w "%{http_code}")"
+set -e
+if [ "$HTTP_CODE" != "200" ]; then
+  echo "❌ Preflight a MAS falló (HTTP $HTTP_CODE). Token/permiso vencido o inválido."
+  echo "   Probá exportar VIYA_USER/VIYA_PASSWORD para que el script renueve el token."
+  exit 1
+fi
+echo "✅ Preflight MAS OK (HTTP 200)"
+
+### ── LANZAR STREAMLIT con todas las envs ─────────────────────────────────────
+exec python -m streamlit run app.py --server.address "$BIND" --server.port "$PORT"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # PONÉ UN TOKEN VÁLIDO ACA:
 export BEARER_TOKEN="<TU_TOKEN_JWT_ACTUAL>"
 export SAS_SERVICES_TOKEN="$BEARER_TOKEN"   # por las dudas, algunas libs miran este
