@@ -1,4 +1,81 @@
 cd /home/cloud-user/real-time-scoring
+cp run_app.sh run_app.sh.bak.$(date +%Y%m%d-%H%M%S)
+
+python - <<'PY'
+p='run_app.sh'
+s=open(p,'r',encoding='utf-8').read()
+
+snippet = r'''
+# -- Auto-refresh token if <10 min to expire --
+ensure_fresh_token() {
+  local tok="${BEARER_TOKEN:-}"; [ -z "$tok" ] && return 0
+  local mins
+  mins=$(python3 - <<'PYPY'
+import os,sys,json,base64,time
+tok=os.environ.get('BEARER_TOKEN','')
+def pad(s): return s + '=' * (-len(s) % 4)
+try:
+  payload=json.loads(base64.urlsafe_b64decode(pad(tok.split('.')[1])).decode())
+  exp=int(payload.get('exp',0))
+  left=int((exp - time.time())/60)
+  print(left)
+except Exception:
+  print(-999)
+PYPY
+)
+  if [ "$mins" -lt 10 ]; then
+    echo "🔁 Token expira en ${mins} min; renovando…"
+    if [ -n "${VIYA_USER:-}" ] && [ -n "${VIYA_PASSWORD:-}" ]; then
+      NEWTOK="$(curl -s --cacert "$REQUESTS_CA_BUNDLE" -u 'sas.ec:' \
+        -d "grant_type=password&username=${VIYA_USER}&password=${VIYA_PASSWORD}&scope=uaa.user" \
+        "$VIYA_URL/SASLogon/oauth/token" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""))')"
+      if [ -n "$NEWTOK" ]; then
+        printf '%s' "$NEWTOK" > "$HOME/token.txt"
+        export BEARER_TOKEN="$NEWTOK" SAS_SERVICES_TOKEN="$NEWTOK" TOKEN="$NEWTOK"
+      else
+        echo "⚠️ No se pudo renovar el token."
+      fi
+    else
+      echo "⚠️ Definí VIYA_USER/VIYA_PASSWORD para autorrenovar."
+    fi
+  fi
+}
+
+# Ejecutar refresh preventivo
+ensure_fresh_token
+'''
+
+anchor = 'export BEARER_TOKEN="$TOK"\nexport SAS_SERVICES_TOKEN="$TOK"\nexport TOKEN="$TOK"\n'
+if anchor in s and 'ensure_fresh_token' not in s:
+    s = s.replace(anchor, anchor + snippet, 1)
+    open(p,'w',encoding='utf-8').write(s)
+    print("OK: auto-refresh agregado.")
+else:
+    print("Nada que hacer (ya estaba agregado o no se encontró el anchor).")
+PY
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+cd /home/cloud-user/real-time-scoring
 
 # Limpio cualquier token viejo del entorno
 unset BEARER_TOKEN SAS_SERVICES_TOKEN TOKEN
