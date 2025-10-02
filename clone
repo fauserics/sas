@@ -1,3 +1,40 @@
+# PONÉ UN TOKEN VÁLIDO ACA:
+export BEARER_TOKEN="<TU_TOKEN_JWT_ACTUAL>"
+export SAS_SERVICES_TOKEN="$BEARER_TOKEN"   # por las dudas, algunas libs miran este
+
+python - <<'PY'
+import os,requests
+u=os.environ["VIYA_URL"].rstrip("/")
+tok=os.environ["BEARER_TOKEN"]
+verify=os.environ["REQUESTS_CA_BUNDLE"] or True
+payload={"inputs":[
+  {"name":"CLAGE","value":94.3},
+  {"name":"CLNO","value":9},
+  {"name":"DEBTINC","value":33.1},
+  {"name":"DELINQ","value":0},
+  {"name":"DEROG","value":0},
+  {"name":"JOB","value":"Office"},
+  {"name":"LOAN","value":1100},
+  {"name":"MORTDUE","value":25860},
+  {"name":"NINQ","value":1},
+  {"name":"REASON","value":"HomeImp"},
+  {"name":"VALUE","value":39025},
+  {"name":"YOJ","value":10.5}
+]}
+r=requests.post(f"{u}/microanalyticScore/modules/gradient_boosting__interactive-m/steps/score",
+                headers={"Authorization":f"Bearer {tok}","Content-Type":"application/json"},
+                json=payload, timeout=20, verify=verify)
+print("HTTP", r.status_code); print((r.text or "")[:300])
+PY
+
+
+
+
+
+
+
+
+
 
 cd /home/cloud-user/real-time-scoring
 # (si tenés venv) 
