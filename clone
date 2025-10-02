@@ -1,3 +1,18 @@
+# 1b) sacar la cadena del servidor (incluye cert servidor + intermedias)
+openssl s_client -showcerts \
+  -servername disco-a20237-rg.gelenable.sas.com \
+  -connect disco-a20237-rg.gelenable.sas.com:443 </dev/null 2>/dev/null \
+| awk '/BEGIN CERTIFICATE/{p=1} p; /END CERTIFICATE/{print ""; p=0}' > ~/viya-chain.pem
+
+# 1c) combinar: certifi + cadena de Viya -> bundle final
+cat "$CACERT" ~/viya-chain.pem > ~/viya-full.pem
+
+
+
+
+
+
+
 # 1a) Ruta del bundle de certifi (el que usa requests)
 python - <<'PY'
 import certifi,sys; print(certifi.where())
