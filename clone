@@ -1,5 +1,38 @@
 cd /home/cloud-user/real-time-scoring
 
+# Limpio cualquier token viejo del entorno
+unset BEARER_TOKEN SAS_SERVICES_TOKEN TOKEN
+
+# Fuerzo el token del archivo para esta ejecución
+export BEARER_TOKEN="$(cat ~/token.txt)"
+export SAS_SERVICES_TOKEN="$BEARER_TOKEN"
+export TOKEN="$BEARER_TOKEN"
+
+sed -i '/^pick_token()/,/^}/c\pick_token() {\n  if [ -s "$HOME/token.txt" ]; then cat "$HOME/token.txt"; return; fi\n  if [ -n "${BEARER_TOKEN:-}" ]; then echo "$BEARER_TOKEN"; return; fi\n  if [ -n "${SAS_SERVICES_TOKEN:-}" ]; then echo "$SAS_SERVICES_TOKEN"; return; fi\n  if [ -n "${TOKEN:-}" ]; then echo "$TOKEN"; return; fi\n  if [ -n "${VIYA_USER:-}" ] && [ -n "${VIYA_PASSWORD:-}" ]; then\n    curl -s --cacert "$REQUESTS_CA_BUNDLE" -u 'sas.ec:' \\\n      -d "grant_type=password&username=${VIYA_USER}&password=${VIYA_PASSWORD}&scope=uaa.user" \\\n      "$VIYA_URL/SASLogon/oauth/token" \\\n    | python3 -c '\''import sys,json; print(json.load(sys.stdin)[\"access_token\"])'\''\n    return\n  fi\n  echo \"\"\n}\n' run_app.sh
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+cd /home/cloud-user/real-time-scoring
+
 # 1) Backup
 cp app.py app.py.bak.$(date +%Y%m%d-%H%M%S)
 
