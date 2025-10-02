@@ -1,3 +1,43 @@
+export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
+export MODULE_ID="gradient_boosting__interactive-m"
+export BEARER_TOKEN="${BEARER_TOKEN:-$TOKEN}"
+export REQUESTS_CA_BUNDLE="$HOME/viya-full.pem"
+
+curl -s -m 20 --cacert "$REQUESTS_CA_BUNDLE" \
+  -H "Authorization: Bearer $BEARER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST "$VIYA_URL/microanalyticScore/modules/$MODULE_ID/steps/score" \
+  -d '{
+    "inputs": [
+      {"name":"CLAGE",   "value": 94.3},
+      {"name":"CLNO",    "value": 9},
+      {"name":"DEBTINC", "value": 33.1},
+      {"name":"DELINQ",  "value": 0},
+      {"name":"DEROG",   "value": 0},
+      {"name":"JOB",     "value": "Office"},
+      {"name":"LOAN",    "value": 1100},
+      {"name":"MORTDUE", "value": 25860},
+      {"name":"NINQ",    "value": 1},
+      {"name":"REASON",  "value": "HomeImp"},
+      {"name":"VALUE",   "value": 39025},
+      {"name":"YOJ",     "value": 10.5}
+    ]
+  }' -w "\nHTTP %{http_code}\n"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 cd /home/cloud-user/real-time-scoring
 mkdir -p score
 cat > score/inputVar.json <<'JSON'
