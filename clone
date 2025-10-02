@@ -1,4 +1,12 @@
 cd /home/cloud-user/real-time-scoring
+sed -i 's/FORCE_CAT = {"reason"}/FORCE_CAT = {"reason", "job"}/' app.py
+sed -i 's#DEFAULT_LEVELS = {"reason": \["DebtCon", "HomeImp"\]}#DEFAULT_LEVELS = {"reason": ["DebtCon","HomeImp"], "job": ["Office","Mgr","ProfExe","Sales","Self","Other"]}#' app.py
+
+
+
+
+
+cd /home/cloud-user/real-time-scoring
 unset BEARER_TOKEN SAS_SERVICES_TOKEN TOKEN
 ./run_app.sh
 
