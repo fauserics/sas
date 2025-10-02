@@ -1,4 +1,80 @@
 cd /home/cloud-user/real-time-scoring
+
+# 1) Backup con timestamp
+cp app.py app.py.bak.$(date +%Y%m%d-%H%M%S)
+
+# 2) Reemplazar parse_mas_outputs por una versión más robusta
+python - <<'PY'
+import re, io
+p="app.py"
+s=open(p,'r',encoding='utf-8').read()
+
+pat=r"def\s+parse_mas_outputs\([^\)]*\):\n(?:\s.*\n)+?"
+new='''
+def parse_mas_outputs(resp_json, threshold=0.5):
+    """Extrae prob y clase de MAS; si no hay clase, la deriva con el umbral."""
+    prob = None; label = None
+    outputs = resp_json.get("outputs")
+    if isinstance(outputs, list):
+        d = {o.get("name"): o.get("value") for o in outputs if isinstance(o, dict)}
+        prob = (d.get("EM_EVENTPROBABILITY") or d.get("P_BAD1") or d.get("P_1")
+                or d.get("EM_PREDICTION") or d.get("PROBABILITY") or d.get("SCORE"))
+        label = (d.get("EM_CLASSIFICATION") or d.get("I_BAD")
+                 or d.get("LABEL") or d.get("PREDICTED"))
+    if prob is None:
+        for k in ("EM_EVENTPROBABILITY","P_BAD1","P_1","EM_PREDICTION","probability","score"):
+            if k in resp_json: prob = resp_json[k]; break
+    if label is None:
+        for k in ("EM_CLASSIFICATION","I_BAD","LABEL","PREDICTED"):
+            if k in resp_json: label = resp_json[k]; break
+
+    # Convertir prob
+    p = None
+    try:
+        if prob is not None:
+            p = float(prob)
+    except Exception:
+        p = None
+
+    # Normalizar/derivar etiqueta
+    lbl = None
+    if label is not None:
+        try:
+            lbl = int(label) if str(label).strip().isdigit() else label
+            if isinstance(lbl, str):
+                s = lbl.strip().upper()
+                if s in ("BAD","1","YES","TRUE"): lbl = 1
+                elif s in ("GOOD","0","NO","FALSE"): lbl = 0
+        except Exception:
+            lbl = None
+
+    if lbl is None and p is not None:
+        lbl = 1 if p >= float(threshold) else 0
+
+    return (p if p is not None else float("nan")), lbl
+'''
+
+s2=re.sub(pat,new,s,flags=re.DOTALL)
+open(p,'w',encoding='utf-8').write(s2)
+print("OK: parse_mas_outputs actualizado.")
+PY
+
+# 3) Reiniciar la app (usa tu script que ya pasa el token)
+./run_app.sh
+
+
+
+
+
+
+
+
+
+
+
+
+
+cd /home/cloud-user/real-time-scoring
 sed -i 's/FORCE_CAT = {"reason"}/FORCE_CAT = {"reason", "job"}/' app.py
 sed -i 's#DEFAULT_LEVELS = {"reason": \["DebtCon", "HomeImp"\]}#DEFAULT_LEVELS = {"reason": ["DebtCon","HomeImp"], "job": ["Office","Mgr","ProfExe","Sales","Self","Other"]}#' app.py
 
