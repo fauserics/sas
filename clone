@@ -1,4 +1,11 @@
 
+mkdir -p score
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  "$VIYA_URL/microanalyticScore/modules/$MAS_MODULE_ID" \
+| python3 - <<'PY' > score/inputVar.json
+
+
+
 cd /home/cloud-user/real-time-scoring
 rm -f sas_code_translator.py
 curl -fL -o sas_code_translator.py "https://raw.githubusercontent.com/<tu_org>/<tu_repo>/<branch>/sas_code_translator.py"
