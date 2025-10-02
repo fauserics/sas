@@ -1,3 +1,22 @@
+# Muestra aud/exp del JWT para ver si está vencido
+python - <<'PY'
+import os,sys,time,base64,json
+tok=os.environ.get("BEARER_TOKEN") or os.environ.get("SAS_SERVICES_TOKEN") or ""
+try:
+    payload=json.loads(base64.urlsafe_b64decode(tok.split('.')[1] + '=='))
+    exp=payload.get('exp'); aud=payload.get('aud')
+    print("aud:",aud)
+    print("exp (epoch):",exp," -> ", time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(exp)) if exp else None)
+    print("now (epoch):",int(time.time())," -> ", time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime()))
+except Exception as e:
+    print("Token ilegible:",e)
+PY
+
+
+
+
+
+
 cd /home/cloud-user/real-time-scoring
 source ~/.venvs/casapp/bin/activate 2>/dev/null || true
 BEARER_TOKEN="$TOKEN" \
