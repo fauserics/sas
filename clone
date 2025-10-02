@@ -1,3 +1,17 @@
+cd /home/cloud-user/real-time-scoring
+source ~/.venvs/casapp/bin/activate 2>/dev/null || true
+BEARER_TOKEN="$TOKEN" \
+REQUESTS_CA_BUNDLE="$CAB" VIYA_CA_BUNDLE="$CAB" \
+VIYA_URL="$VIYA_URL" MAS_MODULE_ID="gradient_boosting__interactive-m" \
+NO_PROXY="$NO_PROXY" HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy= \
+python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501
+
+
+
+
+
+
+
 # Ruta CA del sistema (detecta RHEL/Ubuntu)
 if [ -f /etc/pki/tls/certs/ca-bundle.crt ]; then CAB=/etc/pki/tls/certs/ca-bundle.crt; else CAB=/etc/ssl/certs/ca-certificates.crt; fi
 
