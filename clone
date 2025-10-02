@@ -1,3 +1,8 @@
+import sys,json
+m=json.load(sys.stdin); ins=(m.get("signature") or {}).get("inputs") or []
+print(json.dumps([{"name":i} for i in ins if "name" in i], indent=2))
+PY
+
 
 mkdir -p score
 curl -sS -H "Authorization: Bearer $TOKEN" \
