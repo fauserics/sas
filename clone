@@ -1,3 +1,26 @@
+export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
+export MODULE_ID="gradient_boosting__interactive-m"
+# usa tu bundle
+export REQUESTS_CA_BUNDLE="$HOME/viya-full.pem"
+
+python - <<'PY'
+import os,requests, json
+url=os.environ["VIYA_URL"].rstrip("/")
+mod=os.environ["MODULE_ID"]
+tok=os.environ.get("BEARER_TOKEN") or os.environ.get("SAS_SERVICES_TOKEN")
+sig=requests.get(f"{url}/microanalyticScore/modules/{mod}",
+                 headers={"Authorization":f"Bearer {tok}"},
+                 timeout=15, verify=os.environ["REQUESTS_CA_BUNDLE"]).json()
+ins = (sig.get("signature") or {}).get("inputs") or []
+print("Inputs esperados (nombre:type):")
+for i in ins: print("-", i["name"], ":", i.get("type"))
+PY
+
+
+
+
+
+
 BEARER_TOKEN="$BEARER_TOKEN" \
 VIYA_URL="https://disco-a20237-rg.gelenable.sas.com" \
 MAS_MODULE_ID="gradient_boosting__interactive-m" \
