@@ -1,3 +1,31 @@
+export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
+export REQUESTS_CA_BUNDLE="$HOME/viya-full.pem"
+
+# Debe dar 200/302 (login page)
+python - <<'PY'
+import os,requests
+r = requests.get(os.environ["VIYA_URL"].rstrip("/")+"/SASLogon/login",
+                 timeout=10, verify=os.environ["REQUESTS_CA_BUNDLE"])
+print("SASLogon:", r.status_code)
+PY
+
+# Si tenés $TOKEN válido, probá MAS (debe dar 200)
+curl -s -m 10 --cacert "$HOME/viya-full.pem" \
+  -H "Authorization: Bearer $TOKEN" \
+  "$VIYA_URL/microanalyticScore/modules?limit=1" -w "\nHTTP %{http_code}\n"
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Activá tu venv
 source ~/.venvs/casapp/bin/activate 2>/dev/null || true
 
