@@ -1,3 +1,11 @@
+
+cd /home/cloud-user/real-time-scoring
+rm -f sas_code_translator.py
+curl -fL -o sas_code_translator.py "https://raw.githubusercontent.com/<tu_org>/<tu_repo>/<branch>/sas_code_translator.py"
+
+
+
+
 cd /home/cloud-user/real-time-scoring
 source ~/.venvs/casapp/bin/activate 2>/dev/null || true
 
