@@ -1,3 +1,41 @@
+# Variables base (ajustá si tu CA bundle es otro)
+export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
+export REQUESTS_CA_BUNDLE="$HOME/viya-full.pem"
+
+# Credenciales (si las tenés habilitadas en Viya)
+export VIYA_USER="tu_usuario"
+export VIYA_PASSWORD="tu_password"
+
+# 1) Obtener un token nuevo y guardarlo en ~/token.txt
+curl -s --cacert "$REQUESTS_CA_BUNDLE" -u 'sas.ec:' \
+  -d "grant_type=password&username=${VIYA_USER}&password=${VIYA_PASSWORD}&scope=uaa.user" \
+  "$VIYA_URL/SASLogon/oauth/token" \
+| python3 -c 'import sys,json; print(json.load(sys.stdin)["access_token"])' \
+> ~/token.txt
+
+# 2) Verificar que MAS responde 200 con ese token
+curl -s -m 10 --cacert "$REQUESTS_CA_BUNDLE" \
+  -H "Authorization: Bearer $(cat ~/token.txt)" \
+  "$VIYA_URL/microanalyticScore/modules?limit=1" -w "\nHTTP %{http_code}\n"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 cd /home/cloud-user/real-time-scoring
 
 cat > run_app.sh <<'SH'
