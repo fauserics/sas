@@ -1,4 +1,22 @@
 cd /home/cloud-user/real-time-scoring
+mkdir -p score
+export VIYA_URL="https://disco-a20237-rg.gelenable.sas.com"
+export MAS_MODULE_ID="gradient_boosting__interactive-m"
+
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  "$VIYA_URL/microanalyticScore/modules/$MAS_MODULE_ID" \
+| python3 - <<'PY' > score/inputVar.json
+import sys, json
+m=json.load(sys.stdin); ins=(m.get("signature") or {}).get("inputs") or []
+print(json.dumps([{"name":i["name"]} for i in ins if "name" in i], indent=2))
+PY
+
+
+
+
+
+
+cd /home/cloud-user/real-time-scoring
 curl -L -o sas_code_translator.py \
   https://raw.githubusercontent.com/fauseric/sas/main/sas_code_translator.py
 
