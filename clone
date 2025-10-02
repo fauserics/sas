@@ -1,3 +1,52 @@
+cd /home/cloud-user/real-time-scoring
+cp app.py app.py.bak.$(date +%Y%m%d-%H%M%S)
+
+python - <<'PY'
+import re
+p="app.py"; s=open(p,'r',encoding='utf-8').read()
+
+# Fallback tras el parseo en "Single case — Viya (REST)"
+s = re.sub(
+    r"(p,\s*lbl\s*=\s*parse_mas_outputs\(\s*resp\s*,\s*threshold=st\.session_state\[\s*\"thr\"\s*\]\s*\)\s*)\n",
+    r"""\\1
+                    # fallback: derivar clase si MAS no la manda
+                    try:
+                        import pandas as _pd
+                        if (lbl is None) and (p is not None) and not _pd.isna(p):
+                            lbl = 1 if float(p) >= float(st.session_state["thr"]) else 0
+                    except Exception:
+                        pass
+                    \n""",
+    s, count=1)
+
+# Fallback tras el parseo en el loop de "CSV batch" (Viya)
+s = re.sub(
+    r"(p,\s*lbl\s*=\s*parse_mas_outputs\(\s*resp\s*,\s*threshold=st\.session_state\[\s*\"thr\"\s*\]\s*\)\s*)\n",
+    r"""\\1
+                    # fallback: derivar clase si MAS no la manda (CSV)
+                    try:
+                        import pandas as _pd
+                        if (lbl is None) and (p is not None) and not _pd.isna(p):
+                            lbl = 1 if float(p) >= float(st.session_state["thr"]) else 0
+                    except Exception:
+                        pass
+                    \n""",
+    s)
+
+open(p,'w',encoding='utf-8').write(s)
+print("OK: fallbacks insertados.")
+PY
+
+# Reiniciá la app
+./run_app.sh
+
+
+
+
+
+
+
+
 
 cd /home/cloud-user/real-time-scoring
 cp "$(ls -t app.py.bak.* | head -1)" app.py
