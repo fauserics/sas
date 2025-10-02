@@ -1,3 +1,25 @@
+cd /home/cloud-user/real-time-scoring
+
+# Usá exactamente las env que acabás de probar
+BEARER_TOKEN="$BEARER_TOKEN" \
+VIYA_URL="https://disco-a20237-rg.gelenable.sas.com" \
+MAS_MODULE_ID="gradient_boosting__interactive-m" \
+REQUESTS_CA_BUNDLE="$HOME/viya-full.pem" \
+VIYA_CA_BUNDLE="$HOME/viya-full.pem" \
+NO_PROXY="disco-a20237-rg.gelenable.sas.com,.gelenable.sas.com,localhost,127.0.0.1" \
+HTTPS_PROXY= HTTP_PROXY= https_proxy= http_proxy= \
+python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501
+
+
+
+
+
+
+
+
+
+
+
 # Estás en /home/cloud-user/real-time-scoring
 echo "VIYA_URL=$VIYA_URL"
 echo "MAS_MODULE_ID=$MAS_MODULE_ID"
